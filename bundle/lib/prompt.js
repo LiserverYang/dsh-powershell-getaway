@@ -42,7 +42,10 @@ export const WINDOWS_EXIT_FACT =
  *   * `$VAR` not `$env:VAR` — the executor runs bash, so PowerShell syntax is simply
  *     wrong and worth saying plainly.
  *   * two path forms — Git Bash mounts drives at `/c/...`, WSL at `/mnt/c/...`;
- *     `${DSH_SHELL_KIND}` distinguishes them at runtime.
+ *     `${DSH_SHELL_KIND}` distinguishes them at runtime. Stated as a lookup keyed on
+ *     that variable rather than as one instruction, because the two disagreement
+ *     cases (drive root vs `/mnt`, and Windows `.exe` binaries reachable or not) are
+ *     the likeliest things to get wrong after a dialect switch.
  *   * prefer forward slashes — measured: `git -C 'C:\Users\x'` fails with "cannot
  *     change to ... No such file or directory" while `/f/x` and `F:/x` both work.
  *     Paths DO survive the shell layer intact, so this is a compatibility
@@ -50,25 +53,43 @@ export const WINDOWS_EXIT_FACT =
  *   * single-quote a backslash path — measured: unquoted `echo C:\Users\x` prints
  *     `C:Usersx`, because bash consumes `\U` as an escape. Quoting fixes it, so the
  *     advice is about quoting rather than avoidance.
- *   * no POSIX-path conversion for native Windows programs — the executor sets
- *     MSYS_NO_PATHCONV=1 because the default rewriting is silent and wrong
- *     (`/data` became `C:/Program Files/Git/data`; `/data:/mnt/x` even had its
- *     colon turned into a semicolon, and `cmd.exe /c` turned interactive).
+ *   * no POSIX-path conversion for native Windows programs — under Git Bash the
+ *     executor sets MSYS_NO_PATHCONV=1 because the default rewriting is silent and
+ *     wrong (`/data` became `C:/Program Files/Git/data`; `/data:/mnt/x` even had its
+ *     colon turned into a semicolon, and `cmd.exe /c` turned interactive). Scoped to
+ *     Git Bash in the text, because WSL has no MSYS layer to set it for.
+ *   * signal ambiguity — measured on BOTH dialects: `kill -TERM $$` reports status 15
+ *     on WSL and 3840 on MSYS. On WSL that is indistinguishable from a clean
+ *     `exit 15`, so the guidance tells the model to read 128+N as "killed" rather
+ *     than to attempt a recovery that is not possible.
  *   * `run_in_background` rather than `&` — measured: a bare `sleep 5 &` blocks the
  *     call for the child's lifetime because the child holds the stdout pipe.
  */
 export const POSIX_GUIDANCE = [
-  'Commands run in bash, so use POSIX shell syntax: `$VAR` or `${VAR}` for variables, not `$env:VAR`.',
-  'Paths inside a command use the POSIX form your shell mounts drives at: `/c/Users/...` under Git Bash,',
-  '`/mnt/c/Users/...` under WSL. Read `${DSH_SHELL_KIND}` to see which dialect is active, and convert any',
-  'Windows path on demand with `cygpath -u` (Git Bash) or `wslpath -u` (WSL).',
+  'Commands run in bash. Read `${DSH_SHELL_KIND}` first: `gitbash` is MSYS on Windows, `wsl` is a real Linux',
+  'distribution, and they differ in the two ways below. Use POSIX shell syntax either way: `$VAR` or',
+  '`${VAR}` for variables, not `$env:VAR`.',
+  // The path form is the single most likely thing to get wrong, so it is stated as a
+  // lookup keyed on the variable the executor actually sets, not as a guess.
+  'Paths inside a command use the POSIX form your shell mounts drives at: Git Bash has drives at the root',
+  '(`/c/Users/...`, `/f/...`) while WSL mounts them under `/mnt` (`/mnt/c/Users/...`). Convert a Windows path',
+  'on demand with `cygpath -u` under Git Bash or `wslpath -u` under WSL — do not guess, the two disagree.',
+  // WSL specifics that do not hold for Git Bash.
+  'Under WSL the filesystem is Linux, so `C:` paths are not valid there and Windows executables need their',
+  '`.exe` suffix (`cmd.exe`, `where.exe`, `powershell.exe`). The reverse holds under Git Bash, which is still',
+  'Windows: its binaries are the Windows ones.',
   'Prefer forward slashes (`F:/TidyProjects/x`) for paths you pass to commands: most POSIX tools, including',
   '`git -C`, reject `\\` as a separator. A path containing backslashes must be single-quoted, because bash',
   'otherwise consumes `\\U` as an escape (`echo C:\\Users\\x` prints `C:Usersx`).',
-  'Native Windows programs receive your arguments unchanged: this shell does NOT convert POSIX-looking paths.',
-  'Pass a Windows path to `docker`, `robocopy`, or `cmd` yourself (`docker run -v C:/data:/x`), and do not',
-  'expect `/data` to be translated.',
+  'Under Git Bash, native Windows programs receive your arguments unchanged: that shell does NOT convert',
+  'POSIX-looking paths. Pass a Windows path to `docker`, `robocopy`, or `cmd` yourself',
+  '(`docker run -v C:/data:/x`), and do not expect `/data` to be translated.',
   'Use the tool\'s `run_in_background` argument for long-running work instead of a shell `&`, which keeps the',
   'call blocked until the child exits.',
   'The `workdir` argument takes a Windows path (`F:\\x` or `F:/x`), unlike paths inside the command itself.',
+  // Measured and worth stating: both dialects report a signal death as an ambiguous
+  // status, so the model should not try to infer a signal that cannot be recovered.
+  'A signal death may be reported as a plain exit code (bash uses 128+N, e.g. 143 for SIGTERM) rather than a',
+  'named signal: WSL and Git Bash both return the raw status and the two cases cannot be told apart, so treat',
+  '128+N as "the command was killed" rather than as a normal failure.',
 ].join(' ');

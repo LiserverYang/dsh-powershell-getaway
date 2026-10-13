@@ -60,13 +60,75 @@ export function decodeMsysStatus(status) {
 /**
  * Normalize `wsl.exe`'s int32 overflow sentinel.
  *
- * `wsl.exe` reports failure as status 4294967295 (int32 -1). DSH expects an exit
- * code or null, so a raw passthrough would surface a 10-digit number to the model.
+ * Measured: a distribution that does not exist makes `wsl.exe` exit **4294967295**
+ * (int32 -1), stably across runs. DSH expects an exit code or null, so a raw
+ * passthrough would show the model a ten-digit number instead of the diagnostic.
+ *
+ * The diagnostic itself is worth knowing about, because it is not where you would
+ * look: `wsl.exe` writes "There is no distribution with the supplied name." to
+ * **stdout**, and encodes it as UTF-16LE unless `WSL_UTF8=1` is set (with the flag it
+ * is plain UTF-8). stderr stays EMPTY. An earlier revision of this file guessed
+ * stderr and built a detector on that guess; it could never have fired.
+ *
+ * No detector is needed as a result: `settleWsl` verifies the distribution against the
+ * enumerated list before anything is spawned, and if a launch does fail the model sees
+ * `wsl.exe`'s own clear message on stdout.
+ *
  * @param code - the raw close code.
  * @returns -1 for the sentinel, otherwise the code unchanged.
  */
 export function normalizeWslExitCode(code) {
-  return code === 4294967295 ? -1 : code;
+  return code === 4294967295 || code === -1 ? -1 : code;
+}
+
+/**
+ * Build `WSLENV`, the whitelist that lets Windows environment variables cross into a
+ * WSL distribution.
+ *
+ * TWO MEASURED FACTS, both of which change the implementation:
+ *
+ * 1. NOTHING crosses by default. With no `WSLENV`, a variable set in the Windows
+ *    process is simply absent on the Linux side. Every `DSH_*` name the prompt tells
+ *    the model to read would silently not exist.
+ * 2. A BARE NAME passes the value through UNCHANGED; it does not imply `/p`.
+ *    Measured against `C:\Program Files\Git\usr\bin\bash.exe`:
+ *
+ *        bare name    -> C:\Program Files\Git\usr\bin\bash.exe
+ *        /p           -> /mnt/c/Program Files/Git/usr/bin/bash.exe
+ *        /l           -> /mnt/c/Program Files/Git/usr/bin/bash.exe
+ *        /p/u (both)  -> ""                      <-- empty string
+ *
+ *    So no flag is emitted. A flag combination cannot be silently "upgraded" later
+ *    without re-measuring, and `/p/u` returning an empty value means a wrong guess
+ *    here loses the variable entirely rather than corrupting it visibly.
+ *
+ * Entries already present in an inherited `WSLENV` are preserved verbatim — the user
+ * may have set their own with flags we have no business rewriting — and duplicated
+ * names are skipped so our bare entry cannot override a deliberate one.
+ *
+ * @param inherited - the parent process's `WSLENV`, if any.
+ * @param names - variable names to whitelist.
+ * @returns the `WSLENV` value, or undefined when there is nothing to whitelist.
+ */
+export function buildWslenv(inherited, names) {
+  const existing = String(inherited ?? '')
+    .split(':')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  const claimed = new Set(
+    existing.map((entry) => entry.split('/')[0].trim().toLowerCase()).filter((name) => name.length > 0),
+  );
+  const additions = [];
+  for (const name of names ?? []) {
+    if (typeof name !== 'string' || name.length === 0) continue;
+    const key = name.split('/')[0].trim().toLowerCase();
+    // `/u` in a name means "leave the value alone", which is already the default here.
+    if (key.length === 0 || key === 'u' || claimed.has(key)) continue;
+    claimed.add(key);
+    additions.push(name);
+  }
+  const all = [...existing, ...additions];
+  return all.length === 0 ? undefined : all.join(':');
 }
 
 /**

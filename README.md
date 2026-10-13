@@ -120,16 +120,59 @@ export PATH="${BASH%/*}:/usr/bin:/mingw64/bin:/cmd:$PATH";
 
 `${BASH%/*}` needs no PATH lookup, and the user's own script still owns `$0`, `$?`, `set -e`, and `exit`.
 
+### How the WSL dialect differs (all measured)
+
+WSL is a first-class dialect, not a fallback, but it is **not** Git Bash with a
+different path prefix. Four things differ, and each one was measured rather than
+assumed:
+
+* **Nothing crosses into WSL by default.** A variable set in the Windows process is
+  simply absent on the Linux side, so every `DSH_*` name the prompt tells the model to
+  read would silently not exist. `WSLENV` is therefore derived from the same set the
+  prompt advertises.
+
+* **A bare `WSLENV` name passes the value through unchanged — it does not imply `/p`.**
+  Measured against `C:\Program Files\Git\usr\bin\bash.exe`:
+
+  | entry | value seen inside WSL |
+  |---|---|
+  | `NAME` (bare) | `C:\Program Files\Git\usr\bin\bash.exe` |
+  | `NAME/p` | `/mnt/c/Program Files/Git/usr/bin/bash.exe` |
+  | `NAME/l` | `/mnt/c/Program Files/Git/usr/bin/bash.exe` |
+  | `NAME/p/u` | **empty string** |
+
+  So no flag is emitted. A wrong guess here does not corrupt the value visibly — the
+  `/p/u` row shows it can vanish entirely.
+
+* **Exit statuses are not shifted, unlike MSYS.** Git Bash reports `kill -TERM $$` as
+  `3840`; WSL reports `15`. WSL's `15` is also what a clean `exit 15` produces, and the
+  two are indistinguishable — so the plugin deliberately does **not** run its MSYS
+  decoder on a WSL status (that would read 15 as "signal 15 shifted by 8", i.e. junk),
+  and the prompt tells the model to read `128+N` as "killed" rather than to attempt a
+  recovery that is not possible.
+
+* **`wsl.exe` puts its own diagnostics on stdout, encoded UTF-16LE.** A distribution
+  that does not exist yields status `4294967295`, an explanatory sentence on **stdout**,
+  and an *empty* stderr. `WSL_UTF8=1` turns that output into plain UTF-8. This is worth
+  stating because the obvious guess — read stderr — finds nothing at all.
+
+Because of that last point the plugin does not try to interpret a failed launch. It
+validates the configured distribution against the enumerated list *before* spawning, so
+the failure becomes a message naming the distributions that do exist, and `settleWsl`
+refuses to guess when several are installed (this machine lists `Ubuntu`,
+`docker-desktop`, and `docker-desktop-data`).
+
 ### Why signals are decoded by hand
 
-Git Bash reports signal deaths as a raw Win32 status with `signal: null`, and the encoding is **not uniform**:
+Git Bash reports signal deaths as a raw Win32 status with `signal: null`, and the
+encoding is **not uniform**:
 
 | raised by | status | encoding |
 |---|---|---|
 | `kill -HUP/INT/KILL/TERM/PIPE/ALRM $$` | 256 / 512 / 2304 / 3840 / 3328 / 3584 | `n << 8` |
 | `kill -ILL/ABRT/FPE/SEGV $$` | 33792 / 34304 / 34816 / 35584 | `(128 + n) << 8` |
 
-So the decode is `hi = status >> 8; signo = (hi & 0x80) ? hi - 0x80 : hi`. Without it, `kill -TERM $$` renders as `[exit code: 3840]` — a number the model cannot act on.
+So the decode is `hi = status >> 8; signo = (hi & 0x80) ? hi - 0x80 : hi`. Without it, `kill -TERM $$` renders as `[exit code: 3840]` — a number the model cannot act on. This decoder is applied to Git Bash and Cygwin only; WSL needs none, as above.
 
 ### Sandbox behaviour
 
@@ -158,10 +201,17 @@ Deliberately minimal. Two variables that seemed useful were dropped after measur
 
 ## Known limitations
 
-* **WSL is implemented but not yet verified on real hardware.** The dialect, `WSLENV` handling, CRLF normalisation, and the `wsl.exe` exit-code sentinel are written; the live WSL path has not been exercised.
-* **The confined-sandbox refusal is conservative.** This machine runs `danger-full-access`, so the confined path could not be measured. The refusal is correct either way; only the explanation is unverified.
+* **The WSL dialect is verified end-to-end through the executor, but has not been the
+  live default in a session.** `tools/test-wsl-e2e.mjs` drives the plugin's own
+  `buildArgv`/`mergeEnv` against real `wsl.exe` and passes; what has not been exercised
+  is a full session running with `shell: wsl`.
+* **The confined-sandbox refusal is conservative.** This machine runs
+  `danger-full-access`, so the confined path could not be measured. The refusal is
+  correct either way; only the explanation is unverified.
 * The executor implements no confinement of its own.
-* Toolchain PATH is derived from the bash executable's location, so a non-standard Git layout may need an explicit prefix.
+* Toolchain PATH is derived from the bash executable's location, so a non-standard Git
+  layout may need an explicit prefix. WSL needs no such fix: its `PATH` is native Linux
+  and cannot be shadowed by a Windows installation.
 
 ## Repository layout
 
@@ -182,7 +232,8 @@ tools/
   validate-bundle-patch.mjs  parse it with the host's js-yaml and check its shape
   extract-asar.mjs           unpack app.asar when you only have the packaged app
   test-shell-util.mjs        49 unit tests
-  test-executor.mjs          46 unit tests
+  test-executor.mjs          63 unit tests
+  test-wsl-e2e.mjs           drive real wsl.exe through the plugin's own argv/env
 docs/
   PLAN.md                    design and implementation plan
   RESEARCH.md                the research behind the measurements
@@ -192,7 +243,8 @@ Run the tests with any Node 20+:
 
 ```sh
 node tools/test-shell-util.mjs   # 49 passed
-node tools/test-executor.mjs     # 46 passed
+node tools/test-executor.mjs     # 63 passed
+node tools/test-wsl-e2e.mjs      # requires WSL2 with an 'Ubuntu' distribution
 ```
 
 ## A note on editing these files on Windows

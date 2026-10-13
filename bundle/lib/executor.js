@@ -27,7 +27,7 @@
 //     MSYS_NO_PATHCONV=1 suppresses it; see BASH_ENV_OVERRIDES.
 //   * `bash -c` breaks at ~32720 characters (the CreateProcess 32767 limit).
 //     Longer scripts go over stdin via `bash -s`.
-import { BASH_ENV_OVERRIDES, exceedsArgvLimit, decodeMsysStatus, normalizeWslExitCode, toWindowsPath, stripBom, normalizeCrlf, msysExclusionList } from './shell-util.js';
+import { BASH_ENV_OVERRIDES, exceedsArgvLimit, decodeMsysStatus, normalizeWslExitCode, buildWslenv, toWindowsPath, stripBom, normalizeCrlf, msysExclusionList } from './shell-util.js';
 
 /** Default budgets, matching dsh-pwsh-local so behaviour is unchanged. */
 const DEFAULTS = {
@@ -182,10 +182,16 @@ function mergeEnv(shell, config, spec) {
     // UTF-16LE unless this is set; a UTF-8 pipeline turns it into mojibake.
     env.WSL_UTF8 = '1';
     // A measured trap: Windows environment variables do NOT cross into WSL by
-    // default. Without this list, every DSH_* variable the prompt teaches the
-    // model to read is simply absent.
-    const names = Object.keys({ ...spec.dshEnv, ...config.extraWslenvKeys });
-    if (names.length > 0) env.WSLENV = names.join(':');
+    // default, so every DSH_* name the prompt teaches the model to read would be
+    // absent. `spec.dshEnv` is the shell-env service's POSIX-form contribution, which
+    // is exactly the set the model is told to read; our own DSH_SHELL_* names ride
+    // along in the same object. See buildWslenv for why no flag is emitted.
+    //
+    // The whitelist is derived, never configured: a config key for it would drift out
+    // of step with what the prompt tells the model to read, which is the failure this
+    // whole mechanism exists to prevent.
+    const wslenv = buildWslenv(process.env.WSLENV, Object.keys(spec.dshEnv ?? {}));
+    if (wslenv !== undefined) env.WSLENV = wslenv;
   }
   return env;
 }
@@ -291,15 +297,28 @@ export function makeGetawayExecutor(base, resolveShell, configOf) {
 
     /**
      * Translate a bash-dialect exit status into the signal/exit pair DSH expects.
-     * Without this, `kill -TERM $$` renders as `[exit code: 3840]`, a number the
-     * model cannot act on.
+     *
+     * The two dialects need DIFFERENT handling, which is easy to get wrong in both
+     * directions:
+     *
+     * * Git Bash / Cygwin (MSYS) shifts the status: `kill -TERM $$` arrives as 3840,
+     *   and without a decoder the model is shown `[exit code: 3840]`.
+     * * WSL does NOT shift. It returns the signal NUMBER as the status, or 128+n via
+     *   bash, so 15 means SIGTERM AND means a clean `exit 15` — the two are
+     *   indistinguishable, measured. Running the MSYS decoder on a WSL status would
+     *   read 15 as "signal 15 shifted by 8", i.e. garbage, so WSL is deliberately
+     *   left alone here rather than decoded with a formula that does not apply.
      */
     onProcessDone(proc, stderr, providerRejected, providerError) {
       if (providerRejected) return;
       const shell = this.resolvedShell;
       if (shell === undefined || shell.kind === 'pwsh') return;
-      const raw = shell.kind === 'wsl' ? normalizeWslExitCode(proc.exitCode) : proc.exitCode;
-      if (raw !== proc.exitCode) proc.exitCode = raw;
+      if (shell.kind === 'wsl') {
+        // Only the int32 sentinel is rewritten. A failed launch already reports itself
+        // on stdout in words, so there is nothing to synthesize here.
+        proc.exitCode = normalizeWslExitCode(proc.exitCode);
+        return;
+      }
       const decoded = decodeMsysStatus(proc.exitCode);
       if (decoded.signal !== undefined) {
         proc.signal = decoded.signal;

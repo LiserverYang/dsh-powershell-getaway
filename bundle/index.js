@@ -200,15 +200,44 @@ function selectShell(config, log) {
 }
 
 /**
- * Settle a WSL descriptor whose distribution was left open. Runs on first use,
- * where raising is safe: it becomes an ordinary tool error.
+ * Settle and VALIDATE a WSL descriptor before anything is spawned.
+ *
+ * Two jobs, both about failing loudly rather than mysteriously:
+ *
+ * 1. Pick a distribution. Refusing to guess is deliberate: this machine lists
+ *    `Ubuntu`, `docker-desktop`, and `docker-desktop-data`, and silently running the
+ *    model's commands inside `docker-desktop` would be a misdirection the model could
+ *    not detect.
+ * 2. Verify a CONFIGURED distribution actually exists. Measured: naming a
+ *    non-existent one makes `wsl.exe` exit 4294967295 with **empty stderr**, so the
+ *    failure arrives as a bare `[exit code: -1]` with nothing to read. Checking the
+ *    enumerated list costs one `wsl.exe -l -q` per resolve and turns that into a
+ *    message naming the distros that do exist.
+ *
  * @param shell - the resolved descriptor.
  * @param config - plain configuration.
- * @returns the descriptor with `distro` filled in.
+ * @returns the descriptor with `distro` filled in and verified.
  */
 function settleWsl(shell, config) {
-  if (shell.kind !== 'wsl' || (shell.distro ?? '').length > 0) return shell;
+  if (shell.kind !== 'wsl') return shell;
+  const configured = typeof shell.distro === 'string' && shell.distro.length > 0 ? shell.distro : undefined;
+
+  // An explicit config value wins over the descriptor, but must be real.
+  const wanted = configured ?? (typeof config.wslDistro === 'string' && config.wslDistro.length > 0 ? config.wslDistro : undefined);
   const distros = wslDistros(shell.path);
+
+  if (wanted !== undefined) {
+    if (distros.length > 0 && !distros.some((d) => d.toLowerCase() === wanted.toLowerCase())) {
+      // Case-insensitive because WSL accepts `ubuntu` for `Ubuntu`; being stricter
+      // than the tool itself would reject a working configuration.
+      throw new Error(
+        `shell-getaway: WSL distribution ${JSON.stringify(wanted)} does not exist. ` +
+          `Installed: ${distros.join(', ')}. Fix "wslDistro" in the shell-getaway config.`,
+      );
+    }
+    return { ...shell, distro: wanted };
+  }
+
   if (distros.length === 1) return { ...shell, distro: distros[0] };
   if (distros.length === 0) {
     throw new Error(

@@ -4,6 +4,7 @@
 //
 // Run: node tools/test-executor.mjs
 import { buildArgv, mergeEnv, sandboxRefusal, CONFINED_MODES, pathPrefix } from '../bundle/lib/executor.js';
+import { buildWslenv, normalizeWslExitCode, decodeMsysStatus } from '../bundle/lib/shell-util.js';
 
 let pass = 0;
 let fail = 0;
@@ -117,6 +118,57 @@ const wslEnv = mergeEnv(WSL, cfg, { dshEnv: { DSH_HOME: 'C:\\x', DSH_PROFILE: 'd
 eq('WSL_UTF8 set', wslEnv.WSL_UTF8, '1');
 eq('WSLENV whitelists dsh keys', wslEnv.WSLENV, 'DSH_HOME:DSH_PROFILE');
 eq('wsl has no MSYS vagary', wslEnv.MSYS_NO_PATHCONV, undefined);
+
+// ── WSLENV construction (all facts here are measured) ───────────────────────
+// Nothing crosses into WSL without a whitelist, and a BARE name passes the value
+// through unchanged. Measured against "C:\Program Files\Git\usr\bin\bash.exe":
+//     bare -> unchanged   /p -> /mnt/c/...   /l -> /mnt/c/...   /p/u -> ""
+// So no flag may ever be emitted: a wrong guess loses the variable entirely.
+{
+  eq('bare names, no flags', buildWslenv(undefined, ['DSH_SHELL_KIND', 'DSH_HOME']), 'DSH_SHELL_KIND:DSH_HOME');
+  eq('empty list yields undefined (nothing to set)', buildWslenv(undefined, []), undefined);
+  eq(
+    'a path-shaped value gets NO /p, or it would be rewritten to /mnt/c/...',
+    buildWslenv(undefined, ['DSH_SHELL_PATH']),
+    'DSH_SHELL_PATH',
+  );
+  // An inherited WSLENV may carry the user's own flags; those are none of our business.
+  eq(
+    'inherited entries preserved verbatim',
+    buildWslenv('MY_VAR/p:OTHER/u', ['DSH_HOME']),
+    'MY_VAR/p:OTHER/u:DSH_HOME',
+  );
+  // A name the user already whitelisted must not gain a second, conflicting entry.
+  eq('no duplicate for an inherited name', buildWslenv('DSH_HOME/p', ['DSH_HOME']), 'DSH_HOME/p');
+  eq('duplicate detection ignores the flags', buildWslenv('dsh_home/p', ['DSH_HOME']), 'dsh_home/p');
+  // Malformed input must not produce a stray empty entry or a bad key.
+  eq('blank and non-string names skipped', buildWslenv(undefined, ['', '  ', undefined, 'OK']), 'OK');
+  eq('stray empty inherited segments dropped', buildWslenv('::A::', ['B']), 'A:B');
+  eq('duplicate names in one call collapse', buildWslenv(undefined, ['A', 'A']), 'A');
+  // The whole point: the model is told to read these, so they must all be listed.
+  const shipped = mergeEnv(WSL, cfg, {
+    dshEnv: { DSH_SHELL_KIND: 'wsl', DSH_SHELL_PATH: 'C:\\Program Files\\WSL\\wsl.exe' },
+  });
+  eq('DSH_SHELL_* reach WSL', shipped.WSLENV, 'DSH_SHELL_KIND:DSH_SHELL_PATH');
+}
+
+// ── WSL exit statuses ───────────────────────────────────────────────────────
+// WSL does NOT shift the status the way MSYS does, so the two dialects need
+// different handling and the MSYS decoder must never touch a WSL status.
+{
+  eq('sentinel 4294967295 -> -1', normalizeWslExitCode(4294967295), -1);
+  eq('sentinel -1 -> -1', normalizeWslExitCode(-1), -1);
+  eq('ordinary code untouched', normalizeWslExitCode(15), 15);
+  eq('zero untouched', normalizeWslExitCode(0), 0);
+  // The MSYS decoder must NOT be applied to a WSL status: 15 is SIGTERM, and
+  // decoding it as shifted-by-8 would invent a nonsense signal number.
+  const asMsys = decodeMsysStatus(15);
+  eq('MSYS decoder would misread WSL 15 as a clean exit', asMsys.exitCode, 15);
+  eq('MSYS decoder invents no signal for WSL 15', asMsys.signal, undefined);
+  // Contrast: the SAME decoder is required for MSYS, where the status IS shifted.
+  const gbTerm = decodeMsysStatus(3840);
+  eq('MSYS 3840 really is SIGTERM', gbTerm.signal, 'SIGTERM');
+}
 
 // A caller-supplied env must be able to win (trusted caller semantics).
 const overridden = mergeEnv(GB, cfg, { env: { LANG: 'en_US.UTF-8' } });
