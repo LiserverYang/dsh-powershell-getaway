@@ -205,8 +205,15 @@ assumed:
   ```
 
   then run `wsl.exe --shutdown` from Windows. Removing the Windows proxy also stops it.
-  The line cannot be filtered safely anyway: it is indistinguishable from a real
-  diagnostic, so swallowing it would risk hiding a genuine `wsl:` error.
+  **Verified**: with mirrored networking the line disappears from every invocation, and
+  `tools/test-wsl-e2e.mjs` reports which state the machine is in. Mirrored mode has a
+  useful side effect for this workload — Windows `localhost` becomes reachable from WSL,
+  measured against the Harness's own port, so a dev server started on Windows can be
+  called from a WSL command.
+
+  The line is deliberately NOT swallowed by the plugin, for two reasons: it cannot be
+  reached (above), and it is indistinguishable from a real diagnostic, so filtering it
+  would risk hiding a genuine `wsl:` error.
 
 * **`WSLENV` is a control variable and is excluded from the inherited environment.**
   Measured: once a `WSLENV` exists in the Host environment — which happens as soon as

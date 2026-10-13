@@ -146,16 +146,29 @@ console.log('\n=== long-command stdin route (bash -s) ===');
   check('WSLENV still applies on the stdin route', r.out.includes('kind=wsl'));
 }
 
-console.log('=== wsl.exe stderr noise: documented, not filtered ===');
+console.log('=== wsl.exe stderr noise ===');
 // The line cannot be removed by the plugin. All four routes were measured and are dead
 // (spawn env, the observed-stderr facade, an in-script redirect, overriding result()),
 // so this asserts the DOCUMENTED truth rather than a fix that does not exist: the noise
 // is present, and the command's own stderr arrives intact alongside it.
 {
   const r = runThroughPlugin('echo ok', { DSH_SHELL_KIND: 'wsl' });
-  check('the invocation succeeds despite the noise', r.status === 0 && r.out.includes('ok'), `status=${String(r.status)}`);
+  check('the invocation succeeds', r.status === 0 && r.out.includes('ok'), `status=${String(r.status)}`);
+  // The plugin cannot remove this line (four measured dead routes, see the README), so
+  // its presence is a property of the MACHINE, not of this code. `networkingMode=mirrored`
+  // in `.wslconfig` silences it; without that, it appears on every invocation.
+  // Reported rather than asserted, so the suite passes either way while still showing
+  // which state the machine is in.
   const noisy = r.err.includes('localhost proxy configuration');
-  console.log(`  note: wsl.exe noise present = ${String(noisy)} (expected true; silence it with networkingMode=mirrored)`);
+  console.log(
+    `  note: wsl.exe noise present = ${String(noisy)}` +
+      (noisy ? ' (silence it with networkingMode=mirrored in .wslconfig)' : ' (mirrored networking is configured)'),
+  );
+  check(
+    'stderr carries no noise beyond what the machine emits',
+    r.err.trim() === '' || noisy,
+    JSON.stringify(r.err.trim().slice(0, 120)),
+  );
   const own = runThroughPlugin('echo mine >&2', { DSH_SHELL_KIND: 'wsl' });
   check('the command own stderr survives', own.err.includes('mine'), JSON.stringify(own.err.trim().slice(0, 120)));
   const both = runThroughPlugin('echo out-line; echo err-line >&2', {});
