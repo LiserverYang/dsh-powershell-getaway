@@ -1,5 +1,5 @@
 {
-  "name": "@local/dsh-shell-getaway",
+  "name": "@local/dsh-powershell-getaway",
   "version": "0.2.0-phase1",
   "private": true,
   "type": "module",

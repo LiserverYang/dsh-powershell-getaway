@@ -1,4 +1,4 @@
-# dsh-shell-getaway
+# dsh-powershell-getaway
 
 A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin that gives the agent a **bash** shell on Windows instead of PowerShell.
 
@@ -15,6 +15,22 @@ after:   bash  →  ls -l /c/x | awk '$5 > 0'
 * Mounts the shipped `dsh-tool-bash`, so the model gets the official `bash` tool — its description, schema, job wiring, and rendering are unmodified.
 * Restores one Windows fact the swap would otherwise lose, and teaches the dialect (see [Prompt sections](#prompt-sections)).
 * Refuses to run rather than silently degrade when the sandbox mode cannot actually confine the shell.
+
+## Names
+
+Three names, kept deliberately distinct:
+
+| Name | Value | Notes |
+|---|---|---|
+| repository | `dsh-powershell-getaway` | tracks the workspace directory |
+| npm package | `@local/dsh-powershell-getaway` | `@local/` is the DSH convention for a workspace package awaiting `install_bundle`; it is not an npm org |
+| plugin / row id | `shell-getaway` | loader row id, log prefix, and `shellEnv` contributor name |
+
+The row id stays short and stays **stable**. It is what a profile's
+`- id: shell-getaway` override targets and what the bundle patch declares, so renaming it
+would silently detach an existing override rather than fail — the override would simply
+stop applying. The repo and package names describe the product; the id describes the
+seam it occupies.
 
 ## Requirements
 
@@ -36,6 +52,11 @@ cordis_inspect_query { platform: host, provider: Tool, method: listTools }
 ```
 
 You should see a `bash` tool and no `pwsh` tool.
+
+> Renaming the package means an existing profile still points at the old name. Install
+> with the absolute path (as above) rather than by package name and let `plugin_manager`
+> rewrite the profile, or update `dsh.profile.bundles` and the `link:` dependency in the
+> profile's `package.json` by hand.
 
 ### Activating it in a profile
 
@@ -84,7 +105,7 @@ Example:
 
 ```yaml
 - id: shell-getaway
-  name: '@local/dsh-shell-getaway'
+  name: '@local/dsh-powershell-getaway'
   config:
     shell: wsl
     wslDistro: Ubuntu

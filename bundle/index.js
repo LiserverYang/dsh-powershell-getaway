@@ -1,4 +1,4 @@
-// dsh-shell-getaway — run bash instead of PowerShell on Windows.
+// dsh-powershell-getaway — run bash instead of PowerShell on Windows.
 //
 // Host plugin, in the `export function apply(ctx, config)` form with `inject` and
 // `Config`.

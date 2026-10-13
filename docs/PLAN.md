@@ -1,10 +1,10 @@
-# dsh-shell-getaway —最终实施方案（v2 · 已冻结 · 待开工）
+# dsh-powershell-getaway —最终实施方案（v2 · 已冻结 · 待开工）
 
 > **目标**：在 Windows 上让 agent 用 bash（Git Bash 默认，WSL2 一等公民）替代 PowerShell，
 > 不再为 PowerShell 的转义、引号、`$env:`、`-Command` 长难句买单。
 >
 > **本文件是决策完备的实施方案**，可直接照着写代码，无需再做大设计决策。
-> 调研过程与全部实测原始数据见 [`dsh-shell-getaway-research.md`](dsh-shell-getaway-research.md)。
+> 调研过程与全部实测原始数据见 [`docs/RESEARCH.md`](RESEARCH.md)。
 >
 > 目标环境：DSH `0.2.0-rc.2` · desktop profile · Windows 11 22631 · Node `24.21.0`
 > 已确认可用：Git Bash 5.2.21(msys) · WSL2 3.0.3.0（Ubuntu 26.04，kernel 6.18.54.1）· Cygwin 3.5.4
@@ -13,7 +13,7 @@
 > 1. **默认 Git Bash；WSL2 必须是一等公民**（完整支持，不是"顺手能跑"）。
 > 2. **沙箱有问题必须显式报错**，宁可中断也不静默降级（"静默的未知比报错更可怕"）。
 > 3. 子决策 A–F 全部确定，见 §9（bash 用 `--noprofile --norc -c`；`auto` 受限时报错；
->    用 `usr\bin\bash.exe`；MVP 不自带设置页；包名 `@local/dsh-shell-getaway` /
+>    用 `usr\bin\bash.exe`；MVP 不自带设置页；包名 `@local/dsh-powershell-getaway` /
 >    内部 id `shell-getaway`；`MSYS_NO_PATHCONV=1` 默认开）。
 >
 > **状态**：方案已冻结，等待开工批准。
@@ -75,7 +75,7 @@
 ## 1. 范围
 
 ### 1.1 做
-- 一个 **Host-only bundle**：`@local/dsh-shell-getaway`，安装进 desktop profile。
+- 一个 **Host-only bundle**：`@local/dsh-powershell-getaway`，安装进 desktop profile。
 - 一个 `ctx.shell` 执行器：`pwsh` / `gitbash` / `wsl` / `cygwin` 四分支派发（WSL 与 Git Bash 为一等公民）。
 - 复用官方 `@deepseek-ai/dsh-tool-bash` 作为模型可见的 `bash` tool。
 - 通过覆盖 `preset-standard` 声明来停用 `tool-pwsh`。
@@ -125,7 +125,7 @@ F:\TidyProjects\dsh-powershell-getaway\
 
 ```json
 {
-  "name": "@local/dsh-shell-getaway",
+  "name": "@local/dsh-powershell-getaway",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -155,7 +155,7 @@ F:\TidyProjects\dsh-powershell-getaway\
 # ── 2. 插入我们的执行器（host 平面：所有 preset 的 tool 都要读它） ──
 - insert:
     - id: shell-getaway
-      name: '@local/dsh-shell-getaway'
+      name: '@local/dsh-powershell-getaway'
       config:
         shell: auto
         msysPathConv: off
@@ -631,7 +631,7 @@ ctx.shellEnv.register({
 ### 9.2 E-2 包名与内部标识（已定）
 
 ```json
-{ "name": "@local/dsh-shell-getaway", "private": true, ... }
+{ "name": "@local/dsh-powershell-getaway", "private": true, ... }
 ```
 
 - 沿用官方模板的 `@local/` 约定（`@local/demo-mcp`、`@local/my-decoration`）。
@@ -643,7 +643,7 @@ ctx.shellEnv.register({
   |---|---|
   | bundle id | `shell-getaway` |
   | loader row id（`cordis.patch.yml` 里的 `- id:`） | `shell-getaway` |
-  | 包名 | `@local/dsh-shell-getaway` |
+  | 包名 | `@local/dsh-powershell-getaway` |
   | 目录名 | `bundle/` |
   ⚠️ **不占用** `bash-sandbox` / `pwsh-sandbox` 这两个官方 entry id。
 - ⚠️ 本工作区**不是 git 仓库**（`F:\TidyProjects` 及其上级都没有 `.git`，已核实），

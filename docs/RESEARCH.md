@@ -1,4 +1,4 @@
-# dsh-shell-getaway — 核心调研与实施方案
+# dsh-powershell-getaway — 核心调研与实施方案
 
 > **目标**：让 agent 在 Windows 上能把默认的 PowerShell 换成 bash（Git Bash / WSL2 / Cygwin），
 > 不再为 PowerShell 5/7 的转义、引号、`$env:`、`-Command` 长难句买单。
@@ -163,7 +163,7 @@
 
 ```
                  ┌───────────────────────────────────────────────────────┐
-   模型 → bash   │ dsh-shell-getaway                                     │
+   模型 → bash   │ dsh-powershell-getaway                                     │
    tool          │                                                       │
 （官方          │  ┌─ tool 层：直接挂 @deepseek-ai/dsh-tool-bash ─────┐  │
  dsh-tool-bash）│  │   自带正确的 bash 描述 + tool:bash prompt section │  │
@@ -289,7 +289,7 @@ Windows 上无官方沙箱路径。**不建议作为最终形态**。
 
 ```json
 {
-  "name": "@local/dsh-shell-getaway",
+  "name": "@local/dsh-powershell-getaway",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -304,7 +304,7 @@ Windows 上无官方沙箱路径。**不建议作为最终形态**。
 # cordis.patch.yml
 - insert:
     - id: shell-getaway
-      name: '@local/dsh-shell-getaway'
+      name: '@local/dsh-powershell-getaway'
       config: {}
 ```
 
@@ -473,7 +473,7 @@ restrict(filter) {
 # 2) 插入我们的执行器（host 平面，供所有 preset 的 tool 消费）
 - insert:
     - id: shell-getaway
-      name: '@local/dsh-shell-getaway'
+      name: '@local/dsh-powershell-getaway'
       config:
         shell: auto
 # 3) 覆盖 preset 声明：把 tool-pwsh 换成 disabled，保留其余全部行
@@ -522,7 +522,7 @@ shell: process.platform === "win32" ? "pwsh-sandbox" : "bash-sandbox"
 
 | 方案 | 做法 | 代价 |
 |---|---|---|
-| **A. 占用 `bash-sandbox` id** | 我们的 bundle patch 里 `- id: bash-sandbox / name: '@local/dsh-shell-getaway'` | 设置页**自动出现**（因为 win32 上 `served.has('pwsh-sandbox')` 为 false → 取 bash 分支），且 `dsh-settings` 的 `shell` 命名空间也自然指向我们。**代价**：与 base 层同 id 的行"抢占"，可能触发 duplicate-row 语义，且语义上我们并不是 `dsh-bash-sandbox` |
+| **A. 占用 `bash-sandbox` id** | 我们的 bundle patch 里 `- id: bash-sandbox / name: '@local/dsh-powershell-getaway'` | 设置页**自动出现**（因为 win32 上 `served.has('pwsh-sandbox')` 为 false → 取 bash 分支），且 `dsh-settings` 的 `shell` 命名空间也自然指向我们。**代价**：与 base 层同 id 的行"抢占"，可能触发 duplicate-row 语义，且语义上我们并不是 `dsh-bash-sandbox` |
 | **B. 用自己的 id + 自带设置页** | `- id: shell-getaway`，另写一个 client 插件注册到 `plugins.item` slot | 多写一个 UI 插件（`templates/decoration/` 4 文件），但要遵守"不要 import Harness Client 包、只用 `--dsw-alias-*` theme token"等一堆 UI 规范 |
 
 **建议**：MVP 用 **B**（干净、不抢 id、不踩 duplicate 语义），
@@ -1184,7 +1184,7 @@ spill 自动继承。tool-token retainer（`spill-policy` + `ctx.spillStore`）�
 3. 产出"换 shell 到底省了多少 token / 少了几轮失败"的**基线数据**，作为后续验收依据。
 
 ### 阶段 1：MVP
-- 新建包 `dsh-shell-getaway`，只支持 `shell: 'gitbash' | 'pwsh'`。
+- 新建包 `dsh-powershell-getaway`，只支持 `shell: 'gitbash' | 'pwsh'`。
 - 继承 `PwshLocalExecutor`，覆写 `argv()` / `resolve()`。
 - 挂官方 `@deepseek-ai/dsh-tool-bash`。
 - `ctx.tools.restrict({ deny: ['pwsh'] })`。
@@ -1256,7 +1256,7 @@ spill 自动继承。tool-token retainer（`spill-policy` + `ctx.spillStore`）�
 
 | 路径 | 内容 |
 |---|---|
-| `dsh-shell-getaway-research.md` | 本文档（核心调研 + 实施方案） |
+| `docs/RESEARCH.md` | 本文档（核心调研 + 实施方案） |
 | `.research/findings/01-plugin-contract.md` | **官方插件契约**（2067 行）：bundle manifest、`install_bundle` 流程、`!!js` 全量清单、patch 方言 |
 | `.research/findings/02-powershell-prompt-audit.md` | **PowerShell 提示词足迹全量审计**（1497 行，27 项风险登记，14 项 MUST-FIX） |
 | `.research/findings/03-shell-environment.md` | Git Bash / WSL2 环境实测 —— **未产出**：该子代理被我中止，因为它要测的项目我在 §6 里已全部独立复现（来源见 `.research/probe-*.mjs` 与 `*.txt`）。环境实测的权威结果以本文 §6 为准 |
@@ -1307,7 +1307,7 @@ spill 自动继承。tool-token retainer（`spill-policy` + `ctx.spillStore`）�
 2. ~~沙箱收紧时怎么办？~~ → **已拍板：显式报错**（见 §13.1），本节保留供追溯。
 
 3. **插件归属与命名**（待拍板）
-   - 自建 scope（如 `@tidy/dsh-shell-getaway`）还是本地不入 npm 的 `file:` 包？
+   - 自建 scope（如 `@tidy/dsh-powershell-getaway`）还是本地不入 npm 的 `file:` 包？
      官方 `install_bundle` 接受**绝对本地目录**，所以 MVP 可以先本地、不发 npm。
    - tool 名固定 `bash`（与官方一致，UI/模型都自然）—— 除非你希望叫 `sh` 以示区别。
 
