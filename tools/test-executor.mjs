@@ -4,7 +4,7 @@
 //
 // Run: node tools/test-executor.mjs
 import { buildArgv, mergeEnv, sandboxRefusal, CONFINED_MODES, pathPrefix } from '../bundle/lib/executor.js';
-import { buildWslenv, normalizeWslExitCode, decodeMsysStatus, stripShellNoise } from '../bundle/lib/shell-util.js';
+import { buildWslenv, normalizeWslExitCode, decodeMsysStatus } from '../bundle/lib/shell-util.js';
 
 let pass = 0;
 let fail = 0;
@@ -58,7 +58,7 @@ function eqArgv(label, actual, expectedHead, expectedScriptTail) {
 
 eqArgv('gitbash', buildArgv(GB, { command: 'echo hi' }, cfg), [GB.path, '--noprofile', '--norc', '-c'], 'echo hi');
 eqArgv('cygwin', buildArgv(CYG, { command: 'echo hi' }, cfg), [CYG.path, '--noprofile', '--norc', '-c'], 'echo hi');
-// WSL has no MSYS layer, so it gets no PATH prefix and stays exact.
+// WSL has no MSYS layer, so it gets no PATH prefix and the payload is the plain script.
 eq('wsl argv', buildArgv(WSL, { command: 'echo hi' }, cfg), {
   argv: [WSL.path, '-e', 'bash', '-c', 'echo hi'],
 });
@@ -195,41 +195,6 @@ eq('computed whitelist wins over a caller WSLENV', mergeEnv(WSL, cfg, { env: { W
 // A caller-supplied env must be able to win (trusted caller semantics).
 const overridden = mergeEnv(GB, cfg, { env: { LANG: 'en_US.UTF-8' } });
 eq('caller env overrides defaults', overridden.LANG, 'en_US.UTF-8');
-
-// ── wsl.exe stderr boilerplate ──────────────────────────────────────────────
-// Measured: EVERY wsl.exe invocation prints this one line before the command runs,
-// including commands that succeed. Unfiltered it appears in the model's view of every
-// command, making success look like a complaint.
-{
-  const NOISE =
-    'wsl: A localhost proxy configuration was detected but not mirrored into WSL. WSL in NAT mode does not support localhost proxies.\r\n';
-  eq('the known line is removed', stripShellNoise(NOISE, 'wsl'), '');
-  eq('a command own stderr is preserved', stripShellNoise(`${NOISE}user-err\n`, 'wsl'), 'user-err\n');
-  eq('stderr without the noise is untouched', stripShellNoise('real error\n', 'wsl'), 'real error\n');
-  eq('empty stays empty', stripShellNoise('', 'wsl'), '');
-  // Only the LEADING occurrence is boilerplate; a later lookalike is the command's own
-  // output and must survive, or the filter would eat real text.
-  eq(
-    'only the leading occurrence is stripped',
-    stripShellNoise(`${NOISE}echo: ${NOISE}`, 'wsl'),
-    `echo: ${NOISE}`,
-  );
-  // Other dialects must not be touched at all.
-  eq('gitbash is never filtered', stripShellNoise(NOISE, 'gitbash'), NOISE);
-  eq('pwsh is never filtered', stripShellNoise(NOISE, 'pwsh'), NOISE);
-  // A near-miss must not be swallowed, so the filter cannot hide a real diagnostic.
-  const other = 'wsl: something else entirely\r\nreal\n';
-  eq('an unrelated wsl: line passes through', stripShellNoise(other, 'wsl'), other);
-  const differentProxy = 'wsl: A localhost proxy configuration was detected but not mirrored into WSL2.\r\nreal\n';
-  eq('a different proxy message passes through', stripShellNoise(differentProxy, 'wsl'), differentProxy);
-  // In practice the line is CRLF-terminated; a bare-LF variant also matches, which is
-  // intended — the filter keys on the sentence, not on the terminator.
-  eq(
-    'bare-LF variant also matches',
-    stripShellNoise('wsl: A localhost proxy configuration was detected but not mirrored into WSL.\nreal', 'wsl'),
-    'real',
-  );
-}
 
 // ── sandbox refusal ─────────────────────────────────────────────────────────
 ok('confined modes enumerated', CONFINED_MODES.has('read-only') && CONFINED_MODES.has('workspace-write'));

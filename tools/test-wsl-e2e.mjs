@@ -146,6 +146,23 @@ console.log('\n=== long-command stdin route (bash -s) ===');
   check('WSLENV still applies on the stdin route', r.out.includes('kind=wsl'));
 }
 
+console.log('=== wsl.exe stderr noise: documented, not filtered ===');
+// The line cannot be removed by the plugin. All four routes were measured and are dead
+// (spawn env, the observed-stderr facade, an in-script redirect, overriding result()),
+// so this asserts the DOCUMENTED truth rather than a fix that does not exist: the noise
+// is present, and the command's own stderr arrives intact alongside it.
+{
+  const r = runThroughPlugin('echo ok', { DSH_SHELL_KIND: 'wsl' });
+  check('the invocation succeeds despite the noise', r.status === 0 && r.out.includes('ok'), `status=${String(r.status)}`);
+  const noisy = r.err.includes('localhost proxy configuration');
+  console.log(`  note: wsl.exe noise present = ${String(noisy)} (expected true; silence it with networkingMode=mirrored)`);
+  const own = runThroughPlugin('echo mine >&2', { DSH_SHELL_KIND: 'wsl' });
+  check('the command own stderr survives', own.err.includes('mine'), JSON.stringify(own.err.trim().slice(0, 120)));
+  const both = runThroughPlugin('echo out-line; echo err-line >&2', {});
+  check('stdout is separate from stderr', both.out.trim() === 'out-line', JSON.stringify(both.out.trim()));
+  check('stderr joins stdout on the stderr channel', both.err.includes('err-line'), JSON.stringify(both.err.trim().slice(0, 80)));
+}
+
 console.log('\n=== launch failure signature (nonexistent distro) ===');
 // Corrected after measuring: `wsl.exe` reports this on STDOUT, as UTF-16LE unless
 // WSL_UTF8 is set, and leaves stderr empty. An earlier version of this check asserted

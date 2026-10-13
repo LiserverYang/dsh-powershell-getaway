@@ -27,7 +27,7 @@
 //     MSYS_NO_PATHCONV=1 suppresses it; see BASH_ENV_OVERRIDES.
 //   * `bash -c` breaks at ~32720 characters (the CreateProcess 32767 limit).
 //     Longer scripts go over stdin via `bash -s`.
-import { BASH_ENV_OVERRIDES, exceedsArgvLimit, decodeMsysStatus, normalizeWslExitCode, buildWslenv, stripShellNoise, toWindowsPath, stripBom, normalizeCrlf, msysExclusionList } from './shell-util.js';
+import { BASH_ENV_OVERRIDES, exceedsArgvLimit, decodeMsysStatus, normalizeWslExitCode, buildWslenv, toWindowsPath, stripBom, normalizeCrlf, msysExclusionList } from './shell-util.js';
 
 /** Default budgets, matching dsh-pwsh-local so behaviour is unchanged. */
 const DEFAULTS = {
@@ -325,20 +325,25 @@ export function makeGetawayExecutor(base, resolveShell, configOf) {
         // Only the int32 sentinel is rewritten. A failed launch already reports itself
         // on stdout in words, so there is nothing to synthesize here.
         proc.exitCode = normalizeWslExitCode(proc.exitCode);
-        // Shed wsl.exe's per-invocation boilerplate so a successful command does not
-        // look as though it complained.
+        // wsl.exe's per-invocation stderr line is NOT filtered, because the plugin
+        // cannot reach it. All four routes were tried and are DEAD — do not retry them:
         //
-        // The captured stream is consumed through a moving offset (`readOutput` reads
-        // from `stderrOffset` onward), so the noise is skipped by ADVANCING that offset
-        // past it rather than by rewriting text. `proc.stderr` does not exist on the
-        // result object — only `proc.observed.stderr`, the collector — so nothing else
-        // here would have worked.
-        const stream = proc.observed?.stderr;
-        const captured = stream?.readFrom?.(0)?.text;
-        const cleaned = stripShellNoise(captured, 'wsl');
-        if (typeof captured === 'string' && cleaned !== captured && typeof stream.nextOffset === 'number') {
-          stream.nextOffset += captured.length - cleaned.length;
-        }
+        //   1. Spawn environment: no variable suppresses it. Measured against proxy
+        //      variables, WSL_IGNORE_CFG, WSL_DISABLE_AUTO_PROXY and WSLENV.
+        //   2. Wrapping `proc.observed.stderr.readFrom`: `result()` reports stderr via
+        //      `finalOutput(collected.stderr)`, which reads the COLLECTOR directly, so
+        //      the facade is never consulted. Replacing it changed nothing.
+        //   3. An in-script `exec 2>` redirect: wsl.exe writes the line BEFORE bash
+        //      starts, so nothing inside the script can capture it. Measured — the noise
+        //      still arrived with the redirect as the script's very first statement.
+        //   4. Overriding `result()`: it is an object property built inside
+        //      `executeArgv`, not a prototype method, and its closure over `collected` is
+        //      unreachable from a subclass.
+        //
+        // The line is informational — WSL is in NAT mode and cannot mirror a Windows
+        // localhost proxy — and cannot be told apart from real stderr with certainty, so
+        // it is documented rather than swallowed. It is silenced at the machine level
+        // with `networkingMode=mirrored` in `.wslconfig`; see the README.
         return;
       }
 

@@ -177,19 +177,36 @@ assumed:
   and an *empty* stderr. `WSL_UTF8=1` turns that output into plain UTF-8. This is worth
   stating because the obvious guess — read stderr — finds nothing at all.
 
-* **`wsl.exe` also prints a line of its own to stderr on EVERY invocation:**
+* **`wsl.exe` also prints a line of its own to stderr on EVERY invocation, and the plugin
+  cannot remove it.**
 
   ```
   wsl: A localhost proxy configuration was detected but not mirrored into WSL. …
   ```
 
-  It appears whether the command succeeds or fails, and it is informational — WSL is in
-  NAT mode and cannot mirror a Windows localhost proxy. Left alone it sits in the model's
-  view of every command, making success look like a complaint, so that exact leading line
-  is removed. The filter keys on the sentence rather than the terminator, removes only a
-  leading occurrence, and leaves anything unrecognised untouched, so it cannot hide a
-  real diagnostic. To stop WSL printing it at all, set `networkingMode=mirrored` in
-  `.wslconfig` or remove the Windows proxy.
+  It appears whether the command succeeds or fails — measured at 10/10 invocations — and
+  it is informational: WSL is in NAT mode and cannot mirror a Windows localhost proxy.
+  It does sit in the model's view of every command, which is why four ways to remove it
+  were tried. **All four are dead**, and this is recorded so nobody repeats them:
+
+  | route | why it fails |
+  |---|---|
+  | spawn environment | no variable suppresses it. Measured against proxy variables, `WSL_IGNORE_CFG`, `WSL_DISABLE_AUTO_PROXY`, `WSLENV` |
+  | wrapping `proc.observed.stderr` | `result()` reports stderr through `finalOutput(collected.stderr)`, which reads the **collector** directly — the facade is never consulted, so replacing it changes nothing |
+  | an in-script `exec 2>` redirect | `wsl.exe` writes the line **before bash starts**, so a redirect as the script's first statement is already too late |
+  | overriding `result()` | it is an object property built inside `executeArgv`, not a prototype method, and its closure over the collector is unreachable from a subclass |
+
+  **To silence it, change the machine, not the plugin.** Add to
+  `%USERPROFILE%\.wslconfig`:
+
+  ```ini
+  [wsl2]
+  networkingMode=mirrored
+  ```
+
+  then run `wsl.exe --shutdown` from Windows. Removing the Windows proxy also stops it.
+  The line cannot be filtered safely anyway: it is indistinguishable from a real
+  diagnostic, so swallowing it would risk hiding a genuine `wsl:` error.
 
 * **`WSLENV` is a control variable and is excluded from the inherited environment.**
   Measured: once a `WSLENV` exists in the Host environment — which happens as soon as
@@ -300,7 +317,7 @@ tools/
   validate-bundle-patch.mjs  parse it with the host's js-yaml and check its shape
   extract-asar.mjs           unpack app.asar when you only have the packaged app
   test-shell-util.mjs        49 unit tests
-  test-executor.mjs          76 unit tests
+  test-executor.mjs          66 unit tests
   test-select-shell.mjs      51 tests for the dialect decision itself
   test-wsl-e2e.mjs           drive real wsl.exe through the plugin's own argv/env
 docs/
@@ -314,7 +331,7 @@ Two suites need no Harness, two do:
 
 ```sh
 node tools/test-shell-util.mjs   # 49 passed
-node tools/test-executor.mjs     # 76 passed
+node tools/test-executor.mjs     # 66 passed
 
 # These import the plugin entry, which loads the RUNNING installation's schemastery.
 # That is located relative to process.execPath, so they must run under the same binary
