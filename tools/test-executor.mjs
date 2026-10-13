@@ -1,0 +1,174 @@
+// Self-test for the executor's pure functions (argv building, env merging,
+// sandbox refusal text). These carry the measured behaviours, so they are worth
+// pinning outside the Host process.
+//
+// Run: node tools/test-executor.mjs
+import { buildArgv, mergeEnv, sandboxRefusal, CONFINED_MODES, pathPrefix } from '../bundle/lib/executor.js';
+
+let pass = 0;
+let fail = 0;
+const failures = [];
+function eq(label, actual, expected) {
+  const a = JSON.stringify(actual);
+  const e = JSON.stringify(expected);
+  if (a === e) pass += 1;
+  else {
+    fail += 1;
+    failures.push(`${label}\n    expected ${e}\n    actual   ${a}`);
+  }
+}
+function ok(label, cond, detail) {
+  if (cond) pass += 1;
+  else {
+    fail += 1;
+    failures.push(`${label}\n    ${detail ?? 'condition was false'}`);
+  }
+}
+
+const GB = { kind: 'gitbash', path: 'C:\\Program Files\\Git\\usr\\bin\\bash.exe' };
+const WSL = { kind: 'wsl', path: 'C:\\Program Files\\WSL\\wsl.exe' };
+const CYG = { kind: 'cygwin', path: 'C:\\cygwin64\\bin\\bash.exe' };
+const PWSH = { kind: 'pwsh', path: 'C:\\pwsh.exe' };
+
+const cfg = {
+  msysPathConv: 'off',
+  wslDistro: '',
+  useStdinForLongCommands: true,
+  normalizeCrlfForWsl: true,
+  maxOutputBytes: 64_000,
+  maxSpillBytes: 1024,
+  graceMs: 3000,
+  allowConfined: false,
+};
+
+// ── argv shape ──────────────────────────────────────────────────────────────
+// A bash-dialect argv carries the PATH prefix ahead of the user's script, so the
+// assertions compare the stable parts: the argv head, and the script as a suffix.
+/** Assert the argv head and that the payload ends with the caller's script. */
+function eqArgv(label, actual, expectedHead, expectedScriptTail) {
+  eq(`${label} head`, actual.argv.slice(0, -1), expectedHead);
+  const tail = actual.argv.at(-1);
+  ok(
+    `${label} script is the tail`,
+    tail.endsWith(expectedScriptTail),
+    `payload (${tail.length} chars) does not end with ${JSON.stringify(expectedScriptTail)}`,
+  );
+}
+
+eqArgv('gitbash', buildArgv(GB, { command: 'echo hi' }, cfg), [GB.path, '--noprofile', '--norc', '-c'], 'echo hi');
+eqArgv('cygwin', buildArgv(CYG, { command: 'echo hi' }, cfg), [CYG.path, '--noprofile', '--norc', '-c'], 'echo hi');
+// WSL has no MSYS layer, so it gets no PATH prefix and stays exact.
+eq('wsl argv', buildArgv(WSL, { command: 'echo hi' }, cfg), {
+  argv: [WSL.path, '-e', 'bash', '-c', 'echo hi'],
+});
+eq('wsl with distro', buildArgv(WSL, { command: 'echo hi' }, { ...cfg, wslDistro: 'Ubuntu' }), {
+  argv: [WSL.path, '-d', 'Ubuntu', '-e', 'bash', '-c', 'echo hi'],
+});
+eq('pwsh returns undefined (base handles it)', buildArgv(PWSH, { command: 'echo hi' }, cfg), undefined);
+
+// BOM must not become part of the first token.
+ok(
+  'bom stripped',
+  buildArgv(GB, { command: '\uFEFFecho hi' }, cfg).argv[4].endsWith('echo hi') &&
+    !buildArgv(GB, { command: '\uFEFFecho hi' }, cfg).argv[4].includes('\uFEFF'),
+  'the BOM survived into the payload',
+);
+
+// WSL is the only dialect that needs CRLF normalization.
+ok('gitbash keeps CRLF', buildArgv(GB, { command: 'a\r\nb' }, cfg).argv[4].endsWith('a\r\nb'), 'CRLF was rewritten');
+eq('wsl normalizes CRLF', buildArgv(WSL, { command: 'a\r\nb' }, cfg).argv[4], 'a\nb');
+eq('wsl CRLF kept when disabled', buildArgv(WSL, { command: 'a\r\nb' }, { ...cfg, normalizeCrlfForWsl: false }).argv[4], 'a\r\nb');
+
+// Long scripts move to stdin (measured CreateProcess ceiling ~32720).
+{
+  const long = 'x'.repeat(40_000);
+  const r = buildArgv(GB, { command: long }, cfg);
+  eq('long gitbash -> -s', r.argv, [GB.path, '--noprofile', '--norc', '-s']);
+  ok(
+    'long gitbash -> stdin carries prefix + script',
+    r.stdin.endsWith(long) && r.stdin.startsWith('export PATH='),
+    `stdin length ${r.stdin.length}`,
+  );
+  const w = buildArgv(WSL, { command: long }, cfg);
+  eq('long wsl -> -s', w.argv, [WSL.path, '-e', 'bash', '-s']);
+  eq('long wsl -> stdin', w.stdin, long);
+  const off = buildArgv(GB, { command: long }, { ...cfg, useStdinForLongCommands: false });
+  eq('stdin routing off -> -c', off.argv.at(-2), '-c');
+}
+
+// ── environment ─────────────────────────────────────────────────────────────
+const gbEnv = mergeEnv(GB, cfg, {});
+eq('MSYS_NO_PATHCONV on by default', gbEnv.MSYS_NO_PATHCONV, '1');
+eq('LANG set', gbEnv.LANG, 'C.UTF-8');
+eq('NO_COLOR', gbEnv.NO_COLOR, '1');
+eq('TERM dumb', gbEnv.TERM, 'dumb');
+
+const exclEnv = mergeEnv(GB, { ...cfg, msysPathConv: 'exclude' }, {});
+eq('exclude mode uses ARG_CONV_EXCL', exclEnv.MSYS2_ARG_CONV_EXCL, '*');
+eq('exclude mode drops NO_PATHCONV', exclEnv.MSYS_NO_PATHCONV, undefined);
+
+const custom = mergeEnv(GB, { ...cfg, msysPathConv: 'exclude', msysArgConvExcl: '/data;/var' }, {});
+eq('custom exclusion list', custom.MSYS2_ARG_CONV_EXCL, '/data;/var');
+
+const defaultConv = mergeEnv(GB, { ...cfg, msysPathConv: 'default' }, {});
+eq('default mode leaves MSYS alone', defaultConv.MSYS_NO_PATHCONV, undefined);
+
+const wslEnv = mergeEnv(WSL, cfg, { dshEnv: { DSH_HOME: 'C:\\x', DSH_PROFILE: 'desktop' } });
+eq('WSL_UTF8 set', wslEnv.WSL_UTF8, '1');
+eq('WSLENV whitelists dsh keys', wslEnv.WSLENV, 'DSH_HOME:DSH_PROFILE');
+eq('wsl has no MSYS vagary', wslEnv.MSYS_NO_PATHCONV, undefined);
+
+// A caller-supplied env must be able to win (trusted caller semantics).
+const overridden = mergeEnv(GB, cfg, { env: { LANG: 'en_US.UTF-8' } });
+eq('caller env overrides defaults', overridden.LANG, 'en_US.UTF-8');
+
+// ── sandbox refusal ─────────────────────────────────────────────────────────
+ok('confined modes enumerated', CONFINED_MODES.has('read-only') && CONFINED_MODES.has('workspace-write'));
+{
+  const g = sandboxRefusal('workspace-write', 'gitbash');
+  ok('gitbash refusal names the mode', g.includes('workspace-write'), g);
+  ok('gitbash refusal offers allowConfined escape', g.includes('allowConfined'), g);
+  ok('gitbash refusal offers policy switch', g.includes('danger-full-access'), g);
+  const w = sandboxRefusal('workspace-write', 'wsl');
+  ok('wsl refusal states no override exists', w.includes('no configuration override'), w);
+  ok('wsl refusal does NOT offer allowConfined', !w.includes('allowConfined'), w);
+}
+
+// ── PATH prefix (fixes the measured Cygwin shadowing bug) ───────────────────
+// Regression target: with Cygwin installed, `cygpath` resolved to Cygwin's and
+// answered /cygdrive/c/... where Git's answers /c/... — silently unusable.
+// The fix is a script prefix, because setting env.PATH on the spawn spec was
+// measured to have NO effect: the subprocess layer hands bash its own POSIX PATH.
+{
+  const pre = pathPrefix(GB);
+  ok('gitbash gets a PATH prefix', pre.length > 0, pre);
+  // bash's own directory, derived without any PATH lookup.
+  ok('uses ${BASH%/*} (no external command, no PATH lookup)', pre.includes('${BASH%/*}'), pre);
+  ok('prepends /usr/bin', pre.includes('/usr/bin'), pre);
+  ok('prepends /mingw64/bin', pre.includes('/mingw64/bin'), pre);
+  ok('keeps the caller PATH last', pre.includes(':$PATH'), pre);
+  ok('exports PATH', pre.startsWith('export PATH='), pre);
+  ok('ends with a newline so it cannot glue onto the command', pre.endsWith('\n'), JSON.stringify(pre));
+  // Non-bash dialects must not get a bash prefix.
+  eq('pwsh gets no prefix', pathPrefix(PWSH), '');
+  eq('wsl gets no prefix', pathPrefix(WSL), '');
+  // The prefix rides inside the same -c argument, ahead of the user's script.
+  // Assertions that could print a 30k-character script are avoided: the failing
+  // value in this file is dumped verbatim, which floods the log.
+  const built = buildArgv(GB, { command: 'echo hi' }, cfg);
+  const carried = built.argv[4];
+  ok('prefix is in the same argv element', carried.startsWith('export PATH='), 'argv[4] does not start with the prefix');
+  ok('user script still comes last', carried.endsWith('echo hi'), 'argv[4] does not end with the user script');
+  ok(
+    'prefix is emitted exactly once',
+    carried.split('export PATH=').length === 2,
+    `prefix occurrences: ${carried.split('export PATH=').length - 1}`,
+  );
+}
+
+console.log(`executor tests: ${pass} passed, ${fail} failed`);
+if (fail > 0) {
+  console.log('\nFAILURES:');
+  for (const f of failures) console.log('  - ' + f);
+  process.exit(1);
+}

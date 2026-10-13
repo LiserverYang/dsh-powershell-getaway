@@ -1,0 +1,13 @@
+# Research scratch: extracted DSH sources, probe scripts, raw measurement output.
+# The curated deliverables are README.md, docs/, bundle/ and tools/.
+.research/
+
+# Crash and stack dumps produced by exploratory shell probes.
+*.stackdump
+
+# Editor and OS noise.
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.log

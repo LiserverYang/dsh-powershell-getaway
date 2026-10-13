@@ -1,0 +1,19 @@
+{
+  "name": "@local/dsh-shell-getaway",
+  "version": "0.2.0-phase1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "meta": {
+    "title": "Shell Getaway",
+    "description": "Run bash instead of PowerShell on Windows: Git Bash by default, WSL2 as a first-class alternative."
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
