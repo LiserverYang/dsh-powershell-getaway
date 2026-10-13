@@ -58,6 +58,40 @@ export function decodeMsysStatus(status) {
 }
 
 /**
+ * `wsl.exe` boilerplate that must not reach the model.
+ *
+ * Measured on this machine: EVERY `wsl.exe` invocation prints this one line to stderr
+ * before the command runs, including commands that succeed, and it is stable across
+ * runs. Left alone it appears in the model's view of every single command, which makes
+ * a successful command look as though it complained — and the tool tells the model to
+ * treat stderr as a signal.
+ *
+ * It is informational, not a failure: WSL is in NAT mode and cannot mirror a Windows
+ * localhost proxy. Root cause belongs to the machine, not to the command, so the right
+ * place to read it is the Harness log rather than the model's context. Setting
+ * `networkingMode=mirrored` in `.wslconfig`, or removing the Windows proxy, stops WSL
+ * printing it in the first place.
+ */
+const WSL_STDERR_NOISE = /^wsl: A localhost proxy configuration was detected but not mirrored into WSL\.[^\n]*\r?\n/;
+
+/**
+ * Drop known `wsl.exe` boilerplate from the head of stderr.
+ *
+ * Only exact, measured, leading noise is removed, and only once — a command's own
+ * output is never touched. Anything unrecognised passes through untouched, so this
+ * cannot hide a real diagnostic.
+ *
+ * @param stderr - captured stderr.
+ * @param kind - the active dialect.
+ * @returns stderr with the known leading noise removed.
+ */
+export function stripShellNoise(stderr, kind) {
+  if (kind !== 'wsl') return stderr;
+  const text = String(stderr ?? '');
+  return WSL_STDERR_NOISE.test(text) ? text.replace(WSL_STDERR_NOISE, '') : text;
+}
+
+/**
  * Normalize `wsl.exe`'s int32 overflow sentinel.
  *
  * Measured: a distribution that does not exist makes `wsl.exe` exit **4294967295**

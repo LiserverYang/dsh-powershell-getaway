@@ -27,7 +27,7 @@
 //     MSYS_NO_PATHCONV=1 suppresses it; see BASH_ENV_OVERRIDES.
 //   * `bash -c` breaks at ~32720 characters (the CreateProcess 32767 limit).
 //     Longer scripts go over stdin via `bash -s`.
-import { BASH_ENV_OVERRIDES, exceedsArgvLimit, decodeMsysStatus, normalizeWslExitCode, buildWslenv, toWindowsPath, stripBom, normalizeCrlf, msysExclusionList } from './shell-util.js';
+import { BASH_ENV_OVERRIDES, exceedsArgvLimit, decodeMsysStatus, normalizeWslExitCode, buildWslenv, stripShellNoise, toWindowsPath, stripBom, normalizeCrlf, msysExclusionList } from './shell-util.js';
 
 /** Default budgets, matching dsh-pwsh-local so behaviour is unchanged. */
 const DEFAULTS = {
@@ -162,6 +162,13 @@ function buildArgv(shell, spec, config) {
 /** Environment for one dialect. */
 function mergeEnv(shell, config, spec) {
   const env = { ...BASH_ENV_OVERRIDES, ...spec.env, ...spec.dshEnv };
+  // `WSLENV` is a CONTROL variable, not a value to pass along: whatever the parent
+  // happens to have set would otherwise be inherited wholesale — measured, once a
+  // `WSLENV` was present in the Host environment, every `DSH_*` variable crossed into
+  // WSL regardless of the intended whitelist. The WSL branch below computes the value
+  // deliberately, and `buildWslenv` is given the parent's entry list separately so a
+  // user's own entries are still preserved.
+  delete env.WSLENV;
   if (shell.kind === 'gitbash' || shell.kind === 'cygwin') {
     if (config.msysPathConv === 'off') {
       env.MSYS_NO_PATHCONV = '1';
@@ -313,12 +320,28 @@ export function makeGetawayExecutor(base, resolveShell, configOf) {
       if (providerRejected) return;
       const shell = this.resolvedShell;
       if (shell === undefined || shell.kind === 'pwsh') return;
+
       if (shell.kind === 'wsl') {
         // Only the int32 sentinel is rewritten. A failed launch already reports itself
         // on stdout in words, so there is nothing to synthesize here.
         proc.exitCode = normalizeWslExitCode(proc.exitCode);
+        // Shed wsl.exe's per-invocation boilerplate so a successful command does not
+        // look as though it complained.
+        //
+        // The captured stream is consumed through a moving offset (`readOutput` reads
+        // from `stderrOffset` onward), so the noise is skipped by ADVANCING that offset
+        // past it rather than by rewriting text. `proc.stderr` does not exist on the
+        // result object — only `proc.observed.stderr`, the collector — so nothing else
+        // here would have worked.
+        const stream = proc.observed?.stderr;
+        const captured = stream?.readFrom?.(0)?.text;
+        const cleaned = stripShellNoise(captured, 'wsl');
+        if (typeof captured === 'string' && cleaned !== captured && typeof stream.nextOffset === 'number') {
+          stream.nextOffset += captured.length - cleaned.length;
+        }
         return;
       }
+
       const decoded = decodeMsysStatus(proc.exitCode);
       if (decoded.signal !== undefined) {
         proc.signal = decoded.signal;

@@ -156,6 +156,28 @@ assumed:
   and an *empty* stderr. `WSL_UTF8=1` turns that output into plain UTF-8. This is worth
   stating because the obvious guess — read stderr — finds nothing at all.
 
+* **`wsl.exe` also prints a line of its own to stderr on EVERY invocation:**
+
+  ```
+  wsl: A localhost proxy configuration was detected but not mirrored into WSL. …
+  ```
+
+  It appears whether the command succeeds or fails, and it is informational — WSL is in
+  NAT mode and cannot mirror a Windows localhost proxy. Left alone it sits in the model's
+  view of every command, making success look like a complaint, so that exact leading line
+  is removed. The filter keys on the sentence rather than the terminator, removes only a
+  leading occurrence, and leaves anything unrecognised untouched, so it cannot hide a
+  real diagnostic. To stop WSL printing it at all, set `networkingMode=mirrored` in
+  `.wslconfig` or remove the Windows proxy.
+
+* **`WSLENV` is a control variable and is excluded from the inherited environment.**
+  Measured: once a `WSLENV` exists in the Host environment — which happens as soon as
+  this plugin has run once — every variable in it crosses, whatever the current call
+  intended. The executor therefore never merges an inherited `WSLENV` as a *value*; it
+  reads the parent's entry list explicitly, preserves those entries verbatim (the user
+  may have set their own with flags we have no business rewriting), and appends only the
+  names that are missing.
+
 Because of that last point the plugin does not try to interpret a failed launch. It
 validates the configured distribution against the enumerated list *before* spawning, so
 the failure becomes a message naming the distributions that do exist.
@@ -257,7 +279,7 @@ tools/
   validate-bundle-patch.mjs  parse it with the host's js-yaml and check its shape
   extract-asar.mjs           unpack app.asar when you only have the packaged app
   test-shell-util.mjs        49 unit tests
-  test-executor.mjs          63 unit tests
+  test-executor.mjs          76 unit tests
   test-select-shell.mjs      51 tests for the dialect decision itself
   test-wsl-e2e.mjs           drive real wsl.exe through the plugin's own argv/env
 docs/
@@ -271,7 +293,7 @@ Two suites need no Harness, two do:
 
 ```sh
 node tools/test-shell-util.mjs   # 49 passed
-node tools/test-executor.mjs     # 63 passed
+node tools/test-executor.mjs     # 76 passed
 
 # These import the plugin entry, which loads the RUNNING installation's schemastery.
 # That is located relative to process.execPath, so they must run under the same binary

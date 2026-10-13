@@ -4,7 +4,7 @@
 //
 // Run: node tools/test-executor.mjs
 import { buildArgv, mergeEnv, sandboxRefusal, CONFINED_MODES, pathPrefix } from '../bundle/lib/executor.js';
-import { buildWslenv, normalizeWslExitCode, decodeMsysStatus } from '../bundle/lib/shell-util.js';
+import { buildWslenv, normalizeWslExitCode, decodeMsysStatus, stripShellNoise } from '../bundle/lib/shell-util.js';
 
 let pass = 0;
 let fail = 0;
@@ -116,7 +116,9 @@ eq('default mode leaves MSYS alone', defaultConv.MSYS_NO_PATHCONV, undefined);
 
 const wslEnv = mergeEnv(WSL, cfg, { dshEnv: { DSH_HOME: 'C:\\x', DSH_PROFILE: 'desktop' } });
 eq('WSL_UTF8 set', wslEnv.WSL_UTF8, '1');
-eq('WSLENV whitelists dsh keys', wslEnv.WSLENV, 'DSH_HOME:DSH_PROFILE');
+// The whitelist EXTENDS whatever the parent already exports, so assert containment
+// rather than an exact string — the Host environment normally carries a WSLENV.
+ok('WSLENV whitelists the dsh keys', wslEnv.WSLENV.includes('DSH_HOME') && wslEnv.WSLENV.includes('DSH_PROFILE'), wslEnv.WSLENV);
 eq('wsl has no MSYS vagary', wslEnv.MSYS_NO_PATHCONV, undefined);
 
 // ── WSLENV construction (all facts here are measured) ───────────────────────
@@ -124,6 +126,12 @@ eq('wsl has no MSYS vagary', wslEnv.MSYS_NO_PATHCONV, undefined);
 // through unchanged. Measured against "C:\Program Files\Git\usr\bin\bash.exe":
 //     bare -> unchanged   /p -> /mnt/c/...   /l -> /mnt/c/...   /p/u -> ""
 // So no flag may ever be emitted: a wrong guess loses the variable entirely.
+//
+// Because `buildWslenv` also reads the PARENT's `WSLENV`, assertions run with the
+// parent's value temporarily cleared — otherwise the expected string would depend on
+// whatever the surrounding session happens to export.
+const SAVED_WSLENV = process.env.WSLENV;
+delete process.env.WSLENV;
 {
   eq('bare names, no flags', buildWslenv(undefined, ['DSH_SHELL_KIND', 'DSH_HOME']), 'DSH_SHELL_KIND:DSH_HOME');
   eq('empty list yields undefined (nothing to set)', buildWslenv(undefined, []), undefined);
@@ -145,12 +153,26 @@ eq('wsl has no MSYS vagary', wslEnv.MSYS_NO_PATHCONV, undefined);
   eq('blank and non-string names skipped', buildWslenv(undefined, ['', '  ', undefined, 'OK']), 'OK');
   eq('stray empty inherited segments dropped', buildWslenv('::A::', ['B']), 'A:B');
   eq('duplicate names in one call collapse', buildWslenv(undefined, ['A', 'A']), 'A');
-  // The whole point: the model is told to read these, so they must all be listed.
+
+  // The whole point: the names the prompt tells the model to read must be listed.
   const shipped = mergeEnv(WSL, cfg, {
     dshEnv: { DSH_SHELL_KIND: 'wsl', DSH_SHELL_PATH: 'C:\\Program Files\\WSL\\wsl.exe' },
   });
   eq('DSH_SHELL_* reach WSL', shipped.WSLENV, 'DSH_SHELL_KIND:DSH_SHELL_PATH');
 }
+if (SAVED_WSLENV !== undefined) process.env.WSLENV = SAVED_WSLENV;
+
+// The parent's whitelist is EXTENDED, never replaced or truncated. This matters because
+// the Host environment normally carries a `WSLENV` that a previous call set, and dropping
+// its entries would silently un-whitelist variables the model was told to read.
+{
+  const r = mergeEnv(WSL, cfg, { dshEnv: { DSH_NEW: 'x' } });
+  const names = String(r.WSLENV).split(':');
+  ok('an inherited whitelist is extended', names.includes('DSH_NEW'), r.WSLENV);
+  ok('no entry is lost', names.length >= 2, r.WSLENV);
+}
+// A value smuggled in through the caller env must not override the computed whitelist.
+eq('computed whitelist wins over a caller WSLENV', mergeEnv(WSL, cfg, { env: { WSLENV: 'BOGUS' }, dshEnv: { DSH_NEW: 'x' } }).WSLENV.includes('BOGUS'), false);
 
 // ── WSL exit statuses ───────────────────────────────────────────────────────
 // WSL does NOT shift the status the way MSYS does, so the two dialects need
@@ -173,6 +195,41 @@ eq('wsl has no MSYS vagary', wslEnv.MSYS_NO_PATHCONV, undefined);
 // A caller-supplied env must be able to win (trusted caller semantics).
 const overridden = mergeEnv(GB, cfg, { env: { LANG: 'en_US.UTF-8' } });
 eq('caller env overrides defaults', overridden.LANG, 'en_US.UTF-8');
+
+// ── wsl.exe stderr boilerplate ──────────────────────────────────────────────
+// Measured: EVERY wsl.exe invocation prints this one line before the command runs,
+// including commands that succeed. Unfiltered it appears in the model's view of every
+// command, making success look like a complaint.
+{
+  const NOISE =
+    'wsl: A localhost proxy configuration was detected but not mirrored into WSL. WSL in NAT mode does not support localhost proxies.\r\n';
+  eq('the known line is removed', stripShellNoise(NOISE, 'wsl'), '');
+  eq('a command own stderr is preserved', stripShellNoise(`${NOISE}user-err\n`, 'wsl'), 'user-err\n');
+  eq('stderr without the noise is untouched', stripShellNoise('real error\n', 'wsl'), 'real error\n');
+  eq('empty stays empty', stripShellNoise('', 'wsl'), '');
+  // Only the LEADING occurrence is boilerplate; a later lookalike is the command's own
+  // output and must survive, or the filter would eat real text.
+  eq(
+    'only the leading occurrence is stripped',
+    stripShellNoise(`${NOISE}echo: ${NOISE}`, 'wsl'),
+    `echo: ${NOISE}`,
+  );
+  // Other dialects must not be touched at all.
+  eq('gitbash is never filtered', stripShellNoise(NOISE, 'gitbash'), NOISE);
+  eq('pwsh is never filtered', stripShellNoise(NOISE, 'pwsh'), NOISE);
+  // A near-miss must not be swallowed, so the filter cannot hide a real diagnostic.
+  const other = 'wsl: something else entirely\r\nreal\n';
+  eq('an unrelated wsl: line passes through', stripShellNoise(other, 'wsl'), other);
+  const differentProxy = 'wsl: A localhost proxy configuration was detected but not mirrored into WSL2.\r\nreal\n';
+  eq('a different proxy message passes through', stripShellNoise(differentProxy, 'wsl'), differentProxy);
+  // In practice the line is CRLF-terminated; a bare-LF variant also matches, which is
+  // intended — the filter keys on the sentence, not on the terminator.
+  eq(
+    'bare-LF variant also matches',
+    stripShellNoise('wsl: A localhost proxy configuration was detected but not mirrored into WSL.\nreal', 'wsl'),
+    'real',
+  );
+}
 
 // ── sandbox refusal ─────────────────────────────────────────────────────────
 ok('confined modes enumerated', CONFINED_MODES.has('read-only') && CONFINED_MODES.has('workspace-write'));

@@ -79,7 +79,16 @@ console.log('\n=== WSLENV: do the DSH_* variables actually arrive? ===');
     DSH_SHELL_KIND: 'wsl',
     DSH_SHELL_PATH: WSL_EXE,
   });
-  check('WSLENV whitelists both names', r.env.WSLENV === 'DSH_SHELL_KIND:DSH_SHELL_PATH', r.env.WSLENV);
+  // The whitelist EXTENDS whatever the parent exports (the Host environment normally
+  // carries a WSLENV from a previous call), so assert containment, not equality.
+  const wslenv = String(r.env.WSLENV ?? '');
+  const entries = wslenv.split(':');
+  check(
+    'WSLENV whitelists both names',
+    entries.includes('DSH_SHELL_KIND') && entries.includes('DSH_SHELL_PATH'),
+    wslenv,
+  );
+  check('no flag is emitted on our names (a flag could rewrite or blank the value)', !/DSH_SHELL_(KIND|PATH)\//.test(wslenv), wslenv);
   check('DSH_SHELL_KIND arrived', r.out.includes('kind=wsl'), JSON.stringify(r.out.trim()));
   // A path-shaped value must NOT be rewritten to /mnt/c/...: the model reads this as
   // the identity of the shell it is talking to.
