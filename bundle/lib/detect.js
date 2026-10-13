@@ -168,26 +168,38 @@ export function gitBashCandidates(configured, env = process.env) {
 }
 
 /**
- * Find the first Git Bash that passes identity verification.
+ * Find a usable Git Bash.
+ *
+ * A CONFIGURED PATH IS AUTHORITATIVE, NOT A HINT. When `gitBashPath` is set and proves
+ * unusable, discovery does not run: the caller gets `configuredFailure` and reports it.
+ *
+ * This was measured as a live bug. The configured path WAS recorded as failed, but the
+ * loop had already moved on to the discovered locations and returned one of those — so
+ * an unusable configured path was silently replaced by a different `bash.exe`. That is
+ * the exact "silently wrong" outcome this plugin exists to prevent, and it is why the
+ * `configuredFailure` branch below could previously never be reached. Pinning a path is
+ * how a user selects one Git installation over another; quietly using a different one
+ * would make the setting meaningless.
+ *
  * @param configured - explicit `gitBashPath`.
  * @param env - environment for install roots.
  * @returns the verified shell, or a report of every rejection.
  */
 export function findGitBash(configured, env = process.env) {
   const attempts = [];
-  for (const candidate of gitBashCandidates(configured, env)) {
+  const explicit = typeof configured === 'string' && configured.length > 0 ? configured : undefined;
+
+  if (explicit !== undefined) {
+    const verdict = verifyBash(explicit, 'gitbash');
+    attempts.push({ candidate: explicit, ...verdict });
+    if (verdict.ok) return { found: verdict, attempts };
+    return { found: undefined, attempts, configuredFailure: verdict.reason };
+  }
+
+  for (const candidate of gitBashCandidates(undefined, env)) {
     const verdict = verifyBash(candidate, 'gitbash');
     attempts.push({ candidate, ...verdict });
     if (verdict.ok) return { found: verdict, attempts };
-  }
-  if (configured !== undefined && configured.length > 0) {
-    // An explicit path that fails is a configuration error, not a discovery miss.
-    const only = attempts.find((a) => a.candidate === configured);
-    return {
-      found: undefined,
-      attempts,
-      configuredFailure: only === undefined ? 'was not checked' : only.reason,
-    };
   }
   return { found: undefined, attempts };
 }
@@ -201,12 +213,22 @@ export function findGitBash(configured, env = process.env) {
  */
 export function findCygwin(configured, env = process.env) {
   const attempts = [];
-  const roots = [];
-  if (configured !== undefined && configured.length > 0) roots.push(configured);
+  const explicit = typeof configured === 'string' && configured.length > 0 ? configured : undefined;
+
+  // Authoritative when configured, for the same reason `findGitBash` is: quietly
+  // running a different `bash.exe` than the one pinned would make the setting a lie.
+  if (explicit !== undefined) {
+    const verdict = verifyBash(explicit, 'cygwin');
+    attempts.push({ candidate: explicit, ...verdict });
+    if (verdict.ok) return { found: verdict, attempts };
+    return { found: undefined, attempts, configuredFailure: verdict.reason };
+  }
+
   const systemDrive = env.SystemDrive ?? 'C:';
-  roots.push(join(`${systemDrive}\\`, 'cygwin64', 'bin', 'bash.exe'));
-  roots.push(join(`${systemDrive}\\`, 'cygwin', 'bin', 'bash.exe'));
-  for (const candidate of roots) {
+  for (const candidate of [
+    join(`${systemDrive}\\`, 'cygwin64', 'bin', 'bash.exe'),
+    join(`${systemDrive}\\`, 'cygwin', 'bin', 'bash.exe'),
+  ]) {
     const verdict = verifyBash(candidate, 'cygwin');
     attempts.push({ candidate, ...verdict });
     if (verdict.ok) return { found: verdict, attempts };
@@ -215,12 +237,11 @@ export function findCygwin(configured, env = process.env) {
 }
 
 /** Ordered `wsl.exe` candidates; the Program Files copy is the modern one. */
-export function wslExeCandidates(configured, env = process.env) {
+export function wslExeCandidates(env = process.env) {
   const out = [];
   const add = (p) => {
     if (typeof p === 'string' && p.length > 0 && !out.includes(p)) out.push(p);
   };
-  add(configured);
   const programFiles = env.ProgramFiles ?? 'C:\\Program Files';
   const systemRoot = env.SystemRoot ?? 'C:\\Windows';
   add(join(programFiles, 'WSL', 'wsl.exe'));
@@ -280,6 +301,30 @@ export function wslDistros(exe) {
   } catch {
     return [];
   }
+}
+
+/**
+ * Distributions that exist only to run Docker Desktop's VM.
+ *
+ * They register as WSL distributions but are not usable interactive Linux environments:
+ * they have no login user, and their filesystem is Docker's. They must not count when
+ * deciding whether a default distribution exists, or a machine running Docker Desktop
+ * looks like it has "several distributions" and `auto` refuses to choose — measured on
+ * this machine, where the list is `Ubuntu`, `docker-desktop`, `docker-desktop-data`, and
+ * `Ubuntu` is the only real answer.
+ *
+ * Filtered only from DEFAULT selection. An explicitly configured `wslDistro` is honoured
+ * even if it matches, because a user may deliberately target one.
+ */
+const DOCKER_INTERNAL_DISTROS = /^docker-desktop(-data)?$/i;
+
+/**
+ * The distributions a default may be chosen from.
+ * @param names - every installed distribution.
+ * @returns names excluding Docker Desktop's internal VM distributions.
+ */
+export function selectableDistros(names) {
+  return names.filter((name) => !DOCKER_INTERNAL_DISTROS.test(name));
 }
 
 /** Read one KEY=VALUE from a `reg.exe` query, or undefined. */

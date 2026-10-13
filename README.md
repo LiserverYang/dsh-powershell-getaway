@@ -158,9 +158,31 @@ assumed:
 
 Because of that last point the plugin does not try to interpret a failed launch. It
 validates the configured distribution against the enumerated list *before* spawning, so
-the failure becomes a message naming the distributions that do exist, and `settleWsl`
-refuses to guess when several are installed (this machine lists `Ubuntu`,
-`docker-desktop`, and `docker-desktop-data`).
+the failure becomes a message naming the distributions that do exist.
+
+### Choosing a dialect: `auto` is first-match-wins
+
+`auto` tries **Git Bash → WSL → PowerShell**, and each step is visible in the diagnostic
+when it fails. WSL is probed only as a *fallback*, so a machine with Git Bash never pays
+the distribution-enumeration cost.
+
+Three rules keep the chain from silently doing the wrong thing:
+
+* **Docker Desktop's distributions do not count.** `docker-desktop` and
+  `docker-desktop-data` register as WSL distributions but have no login user, so they are
+  excluded when deciding whether a *default* exists. Without that filter this machine
+  looks like it has "3 distributions", `auto` refuses to choose, and it falls back to
+  PowerShell even though `Ubuntu` is the only real answer. An explicitly configured
+  `wslDistro` is honoured even if it names one of them.
+* **A configured path is authoritative, not a hint.** `gitBashPath`, `cygwinBashPath` and
+  `wslExePath` each pin an exact executable; if the pinned one is unusable the plugin
+  reports *that* and does not quietly substitute a discovered one. This was a real bug:
+  `findGitBash` recorded the failure and then returned a different `bash.exe` anyway, so
+  pinning a path did nothing. Pinning is how you choose one installation over another.
+* **Nothing available still leaves a working shell.** The shipped PowerShell executor
+  stays mounted and the diagnostic says so explicitly — that the tool is still named
+  `bash` but runs PowerShell — because an invisible fallback is indistinguishable from
+  the plugin not loading at all.
 
 ### Why signals are decoded by hand
 
@@ -201,10 +223,11 @@ Deliberately minimal. Two variables that seemed useful were dropped after measur
 
 ## Known limitations
 
-* **The WSL dialect is verified end-to-end through the executor, but has not been the
-  live default in a session.** `tools/test-wsl-e2e.mjs` drives the plugin's own
-  `buildArgv`/`mergeEnv` against real `wsl.exe` and passes; what has not been exercised
-  is a full session running with `shell: wsl`.
+* **The WSL dialect has not yet been the live default for a full session.** It is
+  verified end-to-end through the plugin's own `buildArgv`/`mergeEnv` against real
+  `wsl.exe` (`tools/test-wsl-e2e.mjs`), and the decision chain is covered by
+  `tools/test-select-shell.mjs`. What remains unexercised is a complete session running
+  with `shell: wsl`.
 * **The confined-sandbox refusal is conservative.** This machine runs
   `danger-full-access`, so the confined path could not be measured. The refusal is
   correct either way; only the explanation is unverified.
@@ -212,6 +235,8 @@ Deliberately minimal. Two variables that seemed useful were dropped after measur
 * Toolchain PATH is derived from the bash executable's location, so a non-standard Git
   layout may need an explicit prefix. WSL needs no such fix: its `PATH` is native Linux
   and cannot be shadowed by a Windows installation.
+* A machine whose only WSL distributions are Docker Desktop's has no usable default, and
+  `auto` will fall through to PowerShell with that stated plainly.
 
 ## Repository layout
 
@@ -233,6 +258,7 @@ tools/
   extract-asar.mjs           unpack app.asar when you only have the packaged app
   test-shell-util.mjs        49 unit tests
   test-executor.mjs          63 unit tests
+  test-select-shell.mjs      51 tests for the dialect decision itself
   test-wsl-e2e.mjs           drive real wsl.exe through the plugin's own argv/env
 docs/
   PLAN.md                    design and implementation plan
@@ -241,9 +267,18 @@ docs/
 
 Run the tests with any Node 20+:
 
+Two suites need no Harness, two do:
+
 ```sh
 node tools/test-shell-util.mjs   # 49 passed
 node tools/test-executor.mjs     # 63 passed
+
+# These import the plugin entry, which loads the RUNNING installation's schemastery.
+# That is located relative to process.execPath, so they must run under the same binary
+# the Host uses. Under a plain Node the resolver falls back to a GLOBAL DSH install
+# whose schemastery has no `.volatile()`, and fails with an error that has nothing to do
+# with the code under test.
+ELECTRON_RUN_AS_NODE=1 "<app>/DeepSeek Harness.exe" tools/test-select-shell.mjs   # 51 passed
 node tools/test-wsl-e2e.mjs      # requires WSL2 with an 'Ubuntu' distribution
 ```
 

@@ -29,7 +29,7 @@
 // read. Detection is synchronous by design — `execFileSync` with a timeout —
 // precisely so this can hold.
 import { importShared, runtimeFacts } from './lib/resolve.js';
-import { findGitBash, findCygwin, wslExeCandidates, wslVersion, wslDistros } from './lib/detect.js';
+import { findGitBash, findCygwin, wslExeCandidates, wslVersion, wslDistros, selectableDistros } from './lib/detect.js';
 import { makeGetawayExecutor } from './lib/executor.js';
 import { POSIX_GUIDANCE, WINDOWS_EXIT_FACT, SECTION_ORDER } from './lib/prompt.js';
 import { Config } from './lib/config.js';
@@ -40,6 +40,11 @@ export const name = 'shell-getaway';
 export const inject = ['tools', 'systemPrompt', 'shell', 'shellEnv'];
 
 export { Config };
+
+// Exported for tests: the dialect decision is where the `auto` chain lives, and that
+// chain silently skipped WSL until a test could reach it. Pure apart from bounded
+// `execFileSync` probes, so it is safe to call from a test process.
+export { selectShell, detectWsl };
 
 /**
  * Read one config field as a plain value.
@@ -117,12 +122,94 @@ function safeMessage(error) {
 }
 
 /**
+ * Locate a usable `wsl.exe` and settle on a distribution, synchronously.
+ *
+ * Deliberately does NOT enumerate distributions unless it has to: `wsl.exe -l -q`
+ * can take seconds on a stopped instance, and this runs during activation. With a
+ * configured `wslDistro` the list is only read to VERIFY the name (and a failure to
+ * read it is tolerated); with no configured name the list has to be read, because
+ * guessing between `Ubuntu` and `docker-desktop` is the silent misdirection this
+ * plugin exists to prevent.
+ *
+ * @param config - plain configuration.
+ * @returns `{ shell }` on success, otherwise `{ reason }`.
+ */
+function detectWsl(config) {
+  // A configured path is authoritative, matching `gitBashPath`. Falling through to
+  // discovery after an explicit path failed would silently run a different `wsl.exe`
+  // than the one the user pinned, which is the inconsistency this avoids.
+  const explicit = typeof config.wslExePath === 'string' && config.wslExePath.length > 0 ? config.wslExePath : undefined;
+  if (explicit !== undefined) {
+    if (wslVersion(explicit) === undefined) {
+      return { reason: `the configured wslExePath ${JSON.stringify(explicit)} is not a runnable wsl.exe` };
+    }
+    return settleDistro(explicit, config);
+  }
+
+  const candidates = wslExeCandidates(undefined);
+  const exe = candidates.find((candidate) => wslVersion(candidate) !== undefined);
+  if (exe === undefined) {
+    return {
+      reason: `no runnable wsl.exe was found. Candidates:\n  ${candidates.slice(0, 8).join('\n  ')}`,
+    };
+  }
+  return settleDistro(exe, config);
+}
+
+/**
+ * Choose the distribution for a verified `wsl.exe`.
+ *
+ * Deliberately does NOT enumerate distributions unless it has to: `wsl.exe -l -q` can
+ * take seconds on a stopped instance, and this runs during activation. With a
+ * configured `wslDistro` the list is read only to VERIFY the name, and an unreadable
+ * list is tolerated — an empty read is not proof the name is wrong, and refusing on it
+ * would reject a working configuration whenever the service answered slowly.
+ *
+ * @param exe - a verified `wsl.exe`.
+ * @param config - plain configuration.
+ * @returns `{ shell }` on success, otherwise `{ reason }`.
+ */
+function settleDistro(exe, config) {
+  const configured = typeof config.wslDistro === 'string' ? config.wslDistro : '';
+  if (configured.length > 0) {
+    const distros = wslDistros(exe);
+    if (distros.length > 0 && !distros.some((d) => d.toLowerCase() === configured.toLowerCase())) {
+      return {
+        reason: `wslDistro ${JSON.stringify(configured)} is not installed. Installed: ${distros.join(', ')}`,
+      };
+    }
+    return { shell: { kind: 'wsl', path: exe, distro: configured } };
+  }
+
+  // Docker Desktop's VM distributions are excluded from the DEFAULT choice: they
+  // register as distributions but have no login user, so counting them would make a
+  // one-distro machine look ambiguous and push `auto` back to PowerShell for no reason.
+  const all = wslDistros(exe);
+  const usable = selectableDistros(all);
+  if (usable.length === 1) return { shell: { kind: 'wsl', path: exe, distro: usable[0] } };
+  if (all.length === 0) {
+    return { reason: `wsl.exe is present but no distribution is installed (${exe})` };
+  }
+  if (usable.length === 0) {
+    return {
+      reason:
+        `the only WSL distributions installed are Docker Desktop's internal ones (${all.join(', ')}), ` +
+        'which have no login user and cannot run commands',
+    };
+  }
+  return {
+    reason:
+      `${usable.length} WSL distributions exist (${usable.join(', ')}) and no wslDistro is configured, so ` +
+      'there is no defensible default — running commands in the wrong one would be a silent misdirection',
+  };
+}
+
+/**
  * Resolve a bash dialect SYNCHRONOUSLY, or explain why none is usable.
  *
  * Git Bash and Cygwin are probed eagerly because detection is a bounded
- * `execFileSync`. WSL is NOT probed here beyond locating `wsl.exe`: enumerating
- * distributions can take seconds on a stopped instance, and blocking activation on
- * it would be wrong even though it could not crash.
+ * `execFileSync`. WSL is probed only as a FALLBACK or when asked for explicitly, so a
+ * machine with Git Bash never pays the distribution-enumeration cost.
  *
  * @param config - plain configuration.
  * @param log - diagnostic sink.
@@ -159,43 +246,36 @@ function selectShell(config, log) {
     if (result.found !== undefined) {
       return { shell: { kind: 'cygwin', path: result.found.exe, version: result.found.version } };
     }
-    return { shell: pwsh, reason: `shell=cygwin was requested but no Cygwin bash was found. Tried:\n  ${tried.join('\n  ')}` };
+    const why =
+      result.configuredFailure === undefined
+        ? 'no Cygwin bash was found'
+        : `the configured cygwinBashPath is unusable (${result.configuredFailure})`;
+    return { shell: pwsh, reason: `shell=cygwin was requested but ${why}. Tried:\n  ${tried.join('\n  ')}` };
   }
 
-  // ── WSL: validate the executable now, the distribution at first use ──────
-  if (want === 'wsl') {
-    const candidates = wslExeCandidates(config.wslExePath || undefined);
-    const exe = candidates.find((candidate) => wslVersion(candidate) !== undefined);
-    if (exe === undefined) {
-      return {
-        shell: pwsh,
-        reason: `shell=wsl was requested but no runnable wsl.exe was found. Candidates:\n  ${candidates.slice(0, 8).join('\n  ')}`,
-      };
+  // ── WSL: second in the `auto` chain, first when asked for ────────────────
+  if (want === 'wsl' || want === 'auto') {
+    const wsl = detectWsl(config);
+    if (wsl.shell !== undefined) return { shell: wsl.shell };
+    tried.push(`wsl: ${wsl.reason}`);
+    if (want === 'wsl') {
+      return { shell: pwsh, reason: `shell=wsl was requested but WSL is not usable: ${wsl.reason}` };
     }
-    // A configured distribution is validated against the real list when it can be
-    // read cheaply, because "Ubuntu" here and "docker-desktop" on the next machine
-    // is exactly the silent misdirection this plugin exists to prevent.
-    if (config.wslDistro.length > 0) {
-      const distros = wslDistros(exe);
-      if (distros.length > 0 && !distros.includes(config.wslDistro)) {
-        return {
-          shell: pwsh,
-          reason: `wslDistro ${JSON.stringify(config.wslDistro)} is not installed. Installed: ${distros.join(', ')}`,
-        };
-      }
-    }
-    return { shell: { kind: 'wsl', path: exe, distro: config.wslDistro } };
   }
 
-  // ── auto with no Git Bash ────────────────────────────────────────────────
-  // Keep the shipped PowerShell executor rather than hanging on a WSL probe or
-  // guessing a distribution. The model keeps a working shell; the diagnostic
-  // records exactly what was rejected and how to prefer WSL explicitly.
+  // ── auto exhausted: nothing bash-shaped is available ─────────────────────
+  // The shipped PowerShell executor stays active so the model keeps a working shell,
+  // but the diagnostic names every rejected candidate AND says which shell actually
+  // won — a fallback the user cannot see is indistinguishable from the plugin not
+  // loading at all.
   return {
     shell: pwsh,
     reason:
-      'no Git Bash found, so the shipped PowerShell executor stays active. ' +
-      `Set shell: "wsl" to prefer WSL, or shell: "gitbash" to require Git Bash. Tried:\n  ${tried.join('\n  ')}`,
+      'no bash dialect is available, so the shipped PowerShell executor stays active ' +
+      '(the tool is still named `bash`, but it runs PowerShell). Fix by installing Git for Windows, ' +
+      'by installing a WSL distribution plus `shell: "wsl"` and `wslDistro`, or by setting ' +
+      '`shell: "gitbash"` to make this a hard error instead. Tried:\n  ' +
+      tried.join('\n  '),
   };
 }
 
@@ -302,8 +382,7 @@ function registerEnv(ctx, shellRef, log) {
  * @param ctx - plugin context.
  * @param rawConfig - the row's config, already validated by `Config`.
  */
-export function apply(ctx, rawConfig = {}) {
-  const log = (message) => {
+export function apply(ctx, rawConfig = {}) {  const log = (message) => {
     try {
       ctx.logger?.info?.(`[shell-getaway] ${message}`);
     } catch {
