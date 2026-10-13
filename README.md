@@ -57,6 +57,7 @@ You should see a `bash` tool and no `pwsh` tool.
 > node tools/build-bundle-patch.mjs <shipped-standard.patch.yml> bundle/cordis.patch.yml
 > node tools/verify-bundle-patch.mjs <shipped-standard.patch.yml> bundle/cordis.patch.yml
 > # -> PASS: all 33 plugin rows preserved; only tool-pwsh disabled.
+> node tools/validate-bundle-patch.mjs          # parses it and checks the shape
 > ```
 
 ## Configuration
@@ -178,6 +179,7 @@ bundle/                      the plugin
 tools/
   build-bundle-patch.mjs     regenerate bundle/cordis.patch.yml
   verify-bundle-patch.mjs    prove it preserved every shipped preset row
+  validate-bundle-patch.mjs  parse it with the host's js-yaml and check its shape
   extract-asar.mjs           unpack app.asar when you only have the packaged app
   test-shell-util.mjs        49 unit tests
   test-executor.mjs          46 unit tests
